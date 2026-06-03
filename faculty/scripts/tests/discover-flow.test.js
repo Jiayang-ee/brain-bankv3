@@ -187,7 +187,7 @@ test('processDepartment: URL hint 优先命中（eth-dmtec / tsinghua-sem）', a
   // 选 eth-dmtec
   const entry = loader.byId('eth-dmtec');
   assert.ok(entry, 'eth-dmtec entry must exist');
-  assert.equal(entry.list_url_hint, 'https://mtec.ethz.ch/people/people.html', 'hint 应当出现在 v2.2 数据中');
+  assert.equal(entry.list_url_hint, 'https://mtec.ethz.ch/people.html', 'hint 应当出现在 v2.2 数据中（旧 /people/people.html 路径已 404，v2.2 followup 校准到当前 200 路径）');
 
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'faculty-flow-'));
   const store = createStore({ dataDir, sqlite });
