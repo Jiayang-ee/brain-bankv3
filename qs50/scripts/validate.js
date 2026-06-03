@@ -68,6 +68,12 @@ function fail(msg) {
     if (!ALLOWED_CATEGORIES.has(e.category)) fail(`entry ${key} category invalid: ${e.category}`);
     if (!ALLOWED_STATUS.has(e.status)) fail(`entry ${key} status invalid: ${e.status}`);
     if (typeof e.needs_js_hint !== 'boolean') fail(`entry ${key} needs_js_hint must be boolean`);
+    // v2.2: list_url_hint 可选；若填写必须是 http(s)://
+    if (e.list_url_hint !== undefined && e.list_url_hint !== null) {
+      if (typeof e.list_url_hint !== 'string' || !/^https?:\/\//.test(e.list_url_hint)) {
+        fail(`entry ${key} list_url_hint invalid: ${e.list_url_hint}`);
+      }
+    }
     seenCategories.add(e.category);
   }
   for (const r of ranks) {
