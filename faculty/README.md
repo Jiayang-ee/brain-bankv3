@@ -50,12 +50,12 @@ node faculty/scripts/discover.js --all --dry-run --verbose
 ## 校验
 
 ```bash
-node faculty/scripts/tests/run.js   # 111 个单元测试（v2.3）
+node faculty/scripts/tests/run.js   # 112 个单元测试（v2.3）
 node faculty/scripts/validate.js     # 校验跑批产出的数据
 ```
 
 期望输出末尾：
-- `111 tests, 0 failed`
+- `112 tests, 0 failed`
 - `VALIDATION OK`
 - `school coverage: 50/50 (OK)`
 
