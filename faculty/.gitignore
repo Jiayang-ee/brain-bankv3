@@ -1,0 +1,13 @@
+# 跑批产物不入库（.gitkeep 保留目录结构）
+data/faculty.db
+data/candidates.jsonl
+data/crawl_log.jsonl
+data/html/
+data/*.tmp
+data/*.bak
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+*.swp
