@@ -1,0 +1,51 @@
+rank,name_en,name_local,country,country_code,city
+1,Massachusetts Institute of Technology (MIT),,United States,US,Cambridge, MA
+2,Imperial College London,,United Kingdom,GB,London
+3,Stanford University,,United States,US,Stanford, CA
+4,University of Oxford,,United Kingdom,GB,Oxford
+5,Harvard University,,United States,US,Cambridge, MA
+6,University of Cambridge,,United Kingdom,GB,Cambridge
+7,ETH Zurich,"Eidgenössische Technische Hochschule Zürich",Switzerland,CH,Zurich
+8,UCL (University College London),,United Kingdom,GB,London
+9,California Institute of Technology (Caltech),,United States,US,Pasadena, CA
+10,University of Chicago,,United States,US,Chicago, IL
+11,University of Pennsylvania,,United States,US,Philadelphia, PA
+12,Cornell University,,United States,US,Ithaca, NY
+13,University of Melbourne,,Australia,AU,Melbourne
+14,University of California, Berkeley (UCB),,United States,US,Berkeley, CA
+15,Yale University,,United States,US,New Haven, CT
+16,Peking University,北京大学,China (Mainland),CN,Beijing
+17,Princeton University,,United States,US,Princeton, NJ
+18,University of New South Wales (UNSW Sydney),,Australia,AU,Sydney
+19,University of Toronto,,Canada,CA,Toronto
+20,Tsinghua University,清华大学,China (Mainland),CN,Beijing
+21,University of Michigan-Ann Arbor,,United States,US,Ann Arbor, MI
+22,National University of Singapore (NUS),,Singapore,SG,Singapore
+23,Johns Hopkins University,,United States,US,Baltimore, MD
+24,University of Edinburgh,,United Kingdom,GB,Edinburgh
+25,Columbia University,,United States,US,New York, NY
+26,"École Polytechnique Fédérale de Lausanne (EPFL)",,Switzerland,CH,Lausanne
+27,King's College London,,United Kingdom,GB,London
+28,University of Hong Kong (HKU),香港大學,Hong Kong SAR,HK,Hong Kong
+29,University of Tokyo,東京大学,Japan,JP,Tokyo
+30,Northwestern University,,United States,US,Evanston, IL
+31,University of California, Los Angeles (UCLA),,United States,US,Los Angeles, CA
+32,Fudan University,复旦大学,China (Mainland),CN,Shanghai
+33,New York University (NYU),,United States,US,New York, NY
+34,The University of Manchester,,United Kingdom,GB,Manchester
+35,London School of Economics and Political Science (LSE),,United Kingdom,GB,London
+36,University of Sydney,,Australia,AU,Sydney
+37,Australian National University (ANU),,Australia,AU,Canberra
+38,Seoul National University,서울대학교,South Korea,KR,Seoul
+39,University of Queensland,,Australia,AU,Brisbane
+40,University of Bristol,,United Kingdom,GB,Bristol
+41,The University of Texas at Austin,,United States,US,Austin, TX
+42,University of Amsterdam,Universiteit van Amsterdam,Netherlands,NL,Amsterdam
+43,Zhejiang University,浙江大学,China (Mainland),CN,Hangzhou
+44,University of Washington,,United States,US,Seattle, WA
+45,The Chinese University of Hong Kong (CUHK),香港中文大學,Hong Kong SAR,HK,Hong Kong
+46,Université PSL (Paris Sciences et Lettres),,France,FR,Paris
+47,Monash University,,Australia,AU,Melbourne
+48,Carnegie Mellon University,,United States,US,Pittsburgh, PA
+49,University of British Columbia,,Canada,CA,Vancouver
+50,Ludwig Maximilian University of Munich (LMU Munich),"Ludwig-Maximilians-Universität München",Germany,DE,Munich
