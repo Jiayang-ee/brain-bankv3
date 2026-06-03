@@ -8,6 +8,7 @@
 //   node faculty/scripts/discover.js --limit 10       # 每个 school 最多处理 10 个部门
 //   node faculty/scripts/discover.js --dry-run        # 不发请求，写入样例候选
 //   node faculty/scripts/discover.js --out /tmp/out    # 自定义输出目录
+//   node faculty/scripts/discover.js --skip-existing  # 断点续跑：跳过 db 中已有且 success 的 (source_kind, source_url)
 //   node faculty/scripts/discover.js --verbose        # 详细日志
 //
 // 退出码：0=ok；1=参数/输入错误；2=部分失败但有进展；3=全部失败。
@@ -29,12 +30,13 @@ const { createStore } = require('./lib/storage.js');
 const { htmlRelPath, writeArchive, relToPosix } = require('./lib/files.js');
 
 function parseArgs(argv) {
-  const out = { verbose: false, dryRun: false, limit: 3, limitSet: false, schools: null, all: false, out: null, maxProfiles: 200 };
+  const out = { verbose: false, dryRun: false, limit: 3, limitSet: false, schools: null, all: false, out: null, maxProfiles: 200, skipExisting: false };
   for (let i = 2; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--verbose' || a === '-v') out.verbose = true;
     else if (a === '--dry-run') out.dryRun = true;
     else if (a === '--all') out.all = true;
+    else if (a === '--skip-existing') out.skipExisting = true;
     else if (a === '--schools') { out.schools = argv[++i].split(',').map((s) => Number(s.trim())); }
     else if (a === '--limit') { out.limit = Number(argv[++i]); out.limitSet = true; }
     else if (a === '--max-profiles') { out.maxProfiles = Number(argv[++i]); }
@@ -88,7 +90,7 @@ function candidateId({ kind, sourceUrl }) {
   return crypto.createHash('sha1').update(`${kind}|${sourceUrl}`).digest('hex');
 }
 
-async function findListPage({ entry, fetchImpl, rateLimit, log, dryRun }) {
+async function findListPage({ entry, fetchImpl, rateLimit, log, dryRun, store, skipExisting }) {
   if (dryRun) {
     // dry-run 模式：直接用样例，跳过真实网络
     return { best: dryRunListSample(entry), tried: [] };
@@ -178,7 +180,7 @@ function dryRunPersonalSample({ entry, profileUrl, idx }) {
 }
 
 async function processDepartment({ entry, store, fetchImpl, rateLimit, log, opts }) {
-  const result = { entry, listOk: false, profileCount: 0, chineseCount: 0, errors: [], skipped: false };
+  const result = { entry, listOk: false, profileCount: 0, chineseCount: 0, errors: [], skipped: false, skippedExisting: 0 };
   // 0a. 非 active 入口（suspected_irrelevant / access_failed / requires_manual_confirmation）→ 写 skipped 行
   // 预期跳过：不影响 failures 计数、不影响退出码
   if (entry._kind === 'excluded') {
@@ -304,6 +306,12 @@ async function processDepartment({ entry, store, fetchImpl, rateLimit, log, opts
   log(`profiles for ${entry.department_id}: ${profileUrls.length}, fetching first ${limited.length}`);
   for (let i = 0; i < limited.length; i += 1) {
     const profileUrl = limited[i];
+    // --skip-existing：profile URL 已在 db 中且上轮 success → 不发请求、不落库
+    if (opts.skipExisting && store.getCandidateStatus('personal_page', profileUrl) === 'success') {
+      result.skippedExisting += 1;
+      log(`skip-existing: ${profileUrl}`);
+      continue;
+    }
     let host = '';
     try { host = new URL(profileUrl).host; } catch (_) { /* ignore */ }
     await rateLimit(host);
@@ -453,6 +461,7 @@ async function main() {
   let chinese = 0;
   let failures = 0;
   let skipped = 0;
+  let skippedExisting = 0;
   for (const entry of entries) {
     try {
       log(`processing ${entry.school_rank}/${entry.department_id} → ${entry.url}`);
@@ -462,6 +471,7 @@ async function main() {
       if (r.listOk) withList += 1;
       profiles += r.profileCount;
       chinese += r.chineseCount;
+      skippedExisting += r.skippedExisting || 0;
       if (r.errors.length) failures += 1;
     } catch (err) {
       failures += 1;
@@ -483,7 +493,9 @@ async function main() {
   store.setMeta('last_profiles', String(profiles));
   store.setMeta('last_chinese', String(chinese));
   store.setMeta('last_skipped', String(skipped));
+  store.setMeta('last_skipped_existing', String(skippedExisting));
   store.setMeta('last_failures', String(failures));
+  store.setMeta('skip_existing', String(!!opts.skipExisting));
   store.close();
 
   // 退出码语义：
@@ -498,6 +510,7 @@ async function main() {
     profiles,
     chinese,
     skipped,
+    skippedExisting,
     failures,
     dataDir,
   }, null, 2));

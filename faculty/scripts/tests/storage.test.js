@@ -146,4 +146,29 @@ test('createStore: jsonl 落盘可读', () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('createStore: getCandidateStatus — 给 --skip-existing 用', () => {
+  const { dir, store } = makeTmpStore();
+  // 没记录时返回 null
+  assert.equal(store.getCandidateStatus('personal_page', 'https://x/missing'), null);
+  // 写入 success
+  store.recordCandidate({
+    id: 's1', schoolRank: 1, schoolNameEn: 'MIT', departmentId: 'd',
+    departmentNameEn: 'D', category: 'business_school', sourceKind: 'personal_page',
+    sourceUrl: 'https://x/y', nameRaw: 'Wang', chineseNameProbability: 0.8, crawlStatus: 'success',
+  });
+  assert.equal(store.getCandidateStatus('personal_page', 'https://x/y'), 'success');
+  // 写入 http_error
+  store.recordCandidate({
+    id: 's2', schoolRank: 1, schoolNameEn: 'MIT', departmentId: 'd',
+    departmentNameEn: 'D', category: 'business_school', sourceKind: 'personal_page',
+    sourceUrl: 'https://x/y', nameRaw: 'Wang', chineseNameProbability: 0.8, crawlStatus: 'http_error',
+  });
+  // 第二次写入是 upsert，所以 success 被 http_error 覆盖
+  assert.equal(store.getCandidateStatus('personal_page', 'https://x/y'), 'http_error');
+  // 不同 source_kind 互不影响
+  assert.equal(store.getCandidateStatus('list_page', 'https://x/y'), null);
+  store.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 module.exports = { tests };

@@ -167,6 +167,13 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
     FROM candidates
     WHERE school_rank = ? AND department_id = ?
   `);
+  // 给 --skip-existing 用：查询 (source_kind, source_url) 的最新 crawl_status
+  const findCandidateStatus = db.prepare(`
+    SELECT crawl_status FROM candidates
+    WHERE source_kind = ? AND source_url = ?
+    ORDER BY last_seen_at DESC
+    LIMIT 1
+  `);
 
   function setMetaPair(k, v) { setMeta.run(k, v); }
   function getMetaPair(k) { const r = getMeta.get(k); return r ? r.v : null; }
@@ -240,6 +247,13 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
     return { total: r.total || 0, chinese: r.chinese || 0 };
   }
 
+  // 给 --skip-existing 用：返回 (source_kind, source_url) 的最新 crawl_status，
+  // 没有该条记录返回 null。
+  function getCandidateStatus(sourceKind, sourceUrl) {
+    const r = findCandidateStatus.get(sourceKind, sourceUrl);
+    return r ? r.crawl_status : null;
+  }
+
   function close() {
     try { db.close(); } catch (_) { /* ignore */ }
   }
@@ -251,6 +265,7 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
     recordCandidate,
     recordDepartmentSummary,
     getDeptCounts,
+    getCandidateStatus,
     setMeta: setMetaPair,
     getMeta: getMetaPair,
     close,
