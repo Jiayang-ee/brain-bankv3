@@ -1,4 +1,4 @@
-# Schema 定义 (v1.0)
+# Schema 定义 (v2.1)
 
 ## qs50_schools.json
 
@@ -99,6 +99,7 @@ valid | requires_js | access_failed | suspected_irrelevant | requires_manual_con
 3. 同一 `school_rank` 的 `status="valid"` 入口数量建议 1-3 条；过多会被人工 review 标记。
 4. `url` 必须以 `http://` 或 `https://` 开头；不允许根相对路径与 `javascript:`。
 5. 任何修改 `url` / `department_id` 的操作都必须 bump `meta.version` 并在 PR/评论中说明原因。
+6. **（v2.1 起，PR #1 review fix）`category` 必须覆盖下方枚举全部 10 个值**——即 `entries[].category` 的 `Set` 必须包含 `REQUIRED_CATEGORIES = { business_school, management_school, engineering_management, industrial_engineering, systems_engineering, operations_research, decision_science, information_systems, business_analytics, public_policy }`。`validate.js` 在 CI/PR 流程中作为硬约束；新增/删除 category 必须同步更新本文件与 `validate.js`。
 
 ## 后续可扩展字段
 

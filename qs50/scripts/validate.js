@@ -13,6 +13,13 @@ const ALLOWED_CATEGORIES = new Set([
   'operations_research', 'decision_science', 'information_systems',
   'business_analytics', 'public_policy',
 ]);
+// v2.1: 任务 10 个方向必须全部出现在 category 字段中（PR #1 review fix）
+const REQUIRED_CATEGORIES = new Set([
+  'business_school', 'management_school',
+  'engineering_management', 'industrial_engineering', 'systems_engineering',
+  'operations_research', 'decision_science', 'information_systems',
+  'business_analytics', 'public_policy',
+]);
 const ALLOWED_STATUS = new Set([
   'valid', 'requires_js', 'access_failed', 'suspected_irrelevant', 'requires_manual_confirmation',
 ]);
@@ -50,6 +57,7 @@ function fail(msg) {
   }
   const seenKeys = new Set();
   const schoolRankInDepts = new Set();
+  const seenCategories = new Set();
   for (const e of depts.entries || []) {
     if (!ranks.has(e.school_rank)) fail(`entry ${e.department_id} has unknown school_rank ${e.school_rank}`);
     schoolRankInDepts.add(e.school_rank);
@@ -60,9 +68,15 @@ function fail(msg) {
     if (!ALLOWED_CATEGORIES.has(e.category)) fail(`entry ${key} category invalid: ${e.category}`);
     if (!ALLOWED_STATUS.has(e.status)) fail(`entry ${key} status invalid: ${e.status}`);
     if (typeof e.needs_js_hint !== 'boolean') fail(`entry ${key} needs_js_hint must be boolean`);
+    seenCategories.add(e.category);
   }
   for (const r of ranks) {
     if (!schoolRankInDepts.has(r)) fail(`school rank ${r} has no department entry`);
+  }
+
+  // v2.1: 任务 10 个方向必须全部有 category 条目
+  for (const c of REQUIRED_CATEGORIES) {
+    if (!seenCategories.has(c)) fail(`required category missing in entries: ${c}`);
   }
 
   if (process.exitCode === 1) {
@@ -74,5 +88,16 @@ function fail(msg) {
     const status = {};
     for (const e of depts.entries) status[e.status] = (status[e.status] || 0) + 1;
     console.log(`- status distribution: ${JSON.stringify(status)}`);
+    const cats = {};
+    for (const e of depts.entries) cats[e.category] = (cats[e.category] || 0) + 1;
+    console.log(`- category distribution: ${JSON.stringify(cats)}`);
+    // 列出 10 个 required category 的最小集是否都 ≥ 1
+    const required = [...REQUIRED_CATEGORIES].sort();
+    const missing = required.filter(c => !(c in cats));
+    if (missing.length === 0) {
+      console.log(`- required category coverage: 10/10 (OK)`);
+    } else {
+      console.log(`- required category coverage: ${required.length - missing.length}/${required.length} (missing: ${missing.join(', ')})`);
+    }
   }
 })();

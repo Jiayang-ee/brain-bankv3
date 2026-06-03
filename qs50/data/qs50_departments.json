@@ -1,6 +1,6 @@
 {
   "meta": {
-    "version": "2.0.0",
+    "version": "2.1.0",
     "ranking_edition": "QS World University Rankings 2026",
     "source_url": "https://www.topuniversities.com/university-rankings/world-university-rankings/2026",
     "collection_date": "2026-06-03",
@@ -25,7 +25,7 @@
       "business_analytics": "商业分析 / 量化管理",
       "public_policy": "公共政策 / 公共管理"
     },
-    "notes": "v2.0 在 v1.0 基础上补全 4 个方向：public_policy (28 条) / information_systems (5) / engineering_management 增 (CMU/NUS/PSL) / decision_science 增 (Chicago CDR / Caltech CMS)。Caltech 仍以 suspected_irrelevant 占位，无对口商/管院。其余 status 同 v1.0 约定 (valid 为训练知识预设的稳定入口，爬虫首跑需复核)。"
+    "notes": "v2.1 在 v2.0 基础上：(1) 补齐 business_analytics 类别（v2.0 仅在 notes 中提及，category 字段为空）：新增 5 条独立 program 条目 (MIT MBAn / Imperial MScBA / CMU Tepper MSBA / UT Austin MSBA / UCLA Anderson MQE)；(2) 现在 10/10 任务方向均有独立 category 条目；(3) validate.js 增加 required_category_coverage 校验，强制所有 10 个 category ≥ 1 条。v2.0 仍以 suspected_irrelevant 占位 Caltech。"
   },
   "entries": [
     {
@@ -81,6 +81,19 @@
       "validated_by": null
     },
     {
+      "school_rank": 1,
+      "school_name_en": "Massachusetts Institute of Technology (MIT)",
+      "department_id": "mit-sloan-mban",
+      "department_name_en": "MIT Master of Business Analytics (MBAn) program",
+      "url": "https://mitsloan.mit.edu/master-of-business-analytics",
+      "category": "business_analytics",
+      "status": "valid",
+      "needs_js_hint": false,
+      "notes": "MIT Sloan 下的 12 个月 Business Analytics 硕士；方向含 analytics、机器学习、运筹；与 Sloan 师资高度重合但项目页更便于直接抓 program 教学与教师。",
+      "last_validated_at": null,
+      "validated_by": null
+    },
+    {
       "school_rank": 2,
       "school_name_en": "Imperial College London",
       "department_id": "imperial-business-school",
@@ -90,6 +103,19 @@
       "status": "valid",
       "needs_js_hint": false,
       "notes": "含 MBA、MSc Business Analytics、MSc Finance、PhD。研究方向覆盖金融、运营、运筹与商业分析。Faculty: https://www.imperial.ac.uk/business-school/people/",
+      "last_validated_at": null,
+      "validated_by": null
+    },
+    {
+      "school_rank": 2,
+      "school_name_en": "Imperial College London",
+      "department_id": "imperial-msc-ba",
+      "department_name_en": "Imperial MSc Business Analytics",
+      "url": "https://www.imperial.ac.uk/business-school/programmes/msc-business-analytics",
+      "category": "business_analytics",
+      "status": "valid",
+      "needs_js_hint": false,
+      "notes": "Imperial College Business School 的 MSc Business Analytics 项目；含 statistics、OR、machine learning for business 方向。",
       "last_validated_at": null,
       "validated_by": null
     },
@@ -850,6 +876,19 @@
     {
       "school_rank": 31,
       "school_name_en": "University of California, Los Angeles (UCLA)",
+      "department_id": "ucla-anderson-mqe",
+      "department_name_en": "UCLA Anderson Master of Quantitative Economics (MQE)",
+      "url": "https://www.anderson.ucla.edu/degrees-and-programs/master-of-quantitative-economics",
+      "category": "business_analytics",
+      "status": "valid",
+      "needs_js_hint": false,
+      "notes": "Anderson MQE 是 UCLA 量化分析方向；与 MSBA 略有差异（更偏 econ/quant），但仍归 business_analytics 方向类别。",
+      "last_validated_at": null,
+      "validated_by": null
+    },
+    {
+      "school_rank": 31,
+      "school_name_en": "University of California, Los Angeles (UCLA)",
       "department_id": "ucla-luskin",
       "department_name_en": "UCLA Luskin School of Public Affairs",
       "url": "https://luskin.ucla.edu/",
@@ -1108,6 +1147,19 @@
       "validated_by": null
     },
     {
+      "school_rank": 41,
+      "school_name_en": "The University of Texas at Austin",
+      "department_id": "ut-austin-msba",
+      "department_name_en": "McCombs Master of Science in Business Analytics (MSBA)",
+      "url": "https://www.mccombs.utexas.edu/master-of-science-in-business-analytics",
+      "category": "business_analytics",
+      "status": "valid",
+      "needs_js_hint": false,
+      "notes": "McCombs MSBA 项目；含 AI/ML、Marketing Analytics、Supply Chain Analytics；教师多与 IROM 重合。",
+      "last_validated_at": null,
+      "validated_by": null
+    },
+    {
       "school_rank": 42,
       "school_name_en": "University of Amsterdam",
       "department_id": "uva-abs",
@@ -1286,6 +1338,19 @@
       "status": "valid",
       "needs_js_hint": false,
       "notes": "Tepper 是 CMU 的管理学院，运筹/决策/信息系统方向强势；含 MBA、PhD、MS in Business Analytics / Computational Finance。Faculty: https://www.cmu.edu/tepper/faculty-and-research",
+      "last_validated_at": null,
+      "validated_by": null
+    },
+    {
+      "school_rank": 48,
+      "school_name_en": "Carnegie Mellon University",
+      "department_id": "cmu-tepper-msba",
+      "department_name_en": "Tepper Master of Science in Business Analytics (MSBA)",
+      "url": "https://www.cmu.edu/tepper/degrees-programs/masters/business-analytics",
+      "category": "business_analytics",
+      "status": "valid",
+      "needs_js_hint": false,
+      "notes": "Tepper MSBA 是 CMU 在 business analytics 方向的核心项目；含 AI for Business、Decision Analysis；可与 Heinz CDS 形成互补视图。",
       "last_validated_at": null,
       "validated_by": null
     },
