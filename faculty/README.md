@@ -66,7 +66,16 @@ node faculty/scripts/validate.js     # 校验跑批产出的数据
 | `--verbose` / `-v` | 详细 stderr 日志 | off |
 | `--help` / `-h` | 打印本 README 头部 | — |
 
-退出码：`0` 全成功；`2` 部分失败但有进展；`3` 全部失败或无 active 入口。
+退出码：
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 全部 `processed` 完成；无真 failure（`skipped` 不计入） |
+| `1` | 参数错误或 `loadQs50` 失败 |
+| `2` | 至少一个 active 入口出现真 failure（`no_list_page` / 抛错等），输出 JSON 中 `failures > 0` |
+| `3` | `--schools` / `--limit` 过滤后没有任何 entry 被选中 |
+
+`skipped`（excluded 入口审计行 + `requires_js` 跳过）属于预期路径，不计入 `failures`、不影响退出码，输出 JSON 中单独以 `skipped` 字段暴露，便于 CI 区分。
 
 ## 关键设计
 
@@ -155,6 +164,7 @@ html/<school-slug>/<dept-id>/people/<sha1[0:12]>/index.html   # 个人主页
   "withList": 103,
   "profiles": 515,
   "chinese": 417,
+  "skipped": 2,
   "failures": 0,
   "dataDir": ".../faculty/data"
 }
@@ -164,6 +174,8 @@ html/<school-slug>/<dept-id>/people/<sha1[0:12]>/index.html   # 个人主页
 - `withList` = 103（active 中找到 list 页）
 - `profiles` = 103 × 5 = 515（dry-run 样例 5 个）
 - `chinese` ≈ 417（dry-run 样例中 4/5 是华人）
+- `skipped` = 2（Caltech 两个 `suspected_irrelevant` 审计行，预期跳过、不算 failure）
+- `failures` = 0，进程退出码 0
 
 然后 `node faculty/scripts/validate.js`：
 

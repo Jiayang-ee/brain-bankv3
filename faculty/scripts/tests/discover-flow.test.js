@@ -124,9 +124,58 @@ test('processDepartment: needs_js_hint 跳过（无网络）', async () => {
   if (entry.needs_js_hint) {
     const r = await processDepartment({ entry, store, fetchImpl, rateLimit, log, opts });
     assert.equal(r.listOk, false);
+    assert.equal(r.skipped, true, 'requires_js 路径应置 skipped=true');
+    assert.deepEqual(r.errors, [], 'requires_js 路径不应有 errors');
     const dept = store.db.prepare('SELECT * FROM department_summary WHERE school_rank = ? AND department_id = ?').get(entry.school_rank, entry.department_id);
     assert.equal(dept.last_run_status, 'requires_js');
   }
+  store.close();
+  fs.rmSync(dataDir, { recursive: true, force: true });
+});
+
+test('processDepartment: excluded 入口不计入 failure', async () => {
+  const loader = loadQs50({ root: REPO_ROOT });
+  // Caltech 在 v2.1 数据里有 2 条 suspected_irrelevant
+  const a = parseArgs(['node', 'discover.js', '--all']);
+  const entries = pickEntries(loader, a);
+  const excluded = entries.find((e) => e._kind === 'excluded');
+  assert.ok(excluded, 'expected at least one excluded entry (Caltech)');
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'faculty-flow-'));
+  const store = createStore({ dataDir, sqlite });
+  const opts = { dryRun: false, dataDir, verbose: false, maxProfiles: 1 };
+  const fetchImpl = async () => { throw new Error('should not be called for excluded entry'); };
+  const rateLimit = async () => undefined;
+  const log = () => undefined;
+  const r = await processDepartment({ entry: excluded, store, fetchImpl, rateLimit, log, opts });
+  // 关键断言：excluded 入口走 skipped 路径，不算 failure
+  assert.equal(r.skipped, true, `expected skipped=true, got ${JSON.stringify(r)}`);
+  assert.equal(r.listOk, false);
+  assert.deepEqual(r.errors, [], 'excluded 入口不应有 errors');
+  // 部门汇总行应写为 skipped
+  const dept = store.db.prepare('SELECT * FROM department_summary WHERE school_rank = ? AND department_id = ?')
+    .get(excluded.school_rank, excluded.department_id);
+  assert.ok(dept);
+  assert.equal(dept.last_run_status, 'skipped');
+  store.close();
+  fs.rmSync(dataDir, { recursive: true, force: true });
+});
+
+test('processDepartment: active 但无 list page → errors 计入 failure', async () => {
+  const loader = loadQs50({ root: REPO_ROOT });
+  const entry = loader.forRank(1).find((e) => e.department_id === 'mit-sloan');
+  assert.ok(entry);
+  // 强制把 entry 标为 active 即可（forRank 拿到的就是 active）
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'faculty-flow-'));
+  const store = createStore({ dataDir, sqlite });
+  const opts = { dryRun: false, dataDir, verbose: false, maxProfiles: 1 };
+  // fetchImpl 永远失败，模拟 active 入口但 list 页面全部 404
+  const fetchImpl = async () => ({ ok: false, error: 'http_error', status: 404, bytes: 0, durationMs: 1, errorDetail: 'forced 404' });
+  const rateLimit = async () => undefined;
+  const log = () => undefined;
+  const r = await processDepartment({ entry, store, fetchImpl, rateLimit, log, opts });
+  assert.equal(r.skipped, false, 'active 入口走 no_list_page 不应算 skipped');
+  assert.equal(r.listOk, false);
+  assert.ok(r.errors.includes('no_list_page'), 'no_list_page 应记入 errors');
   store.close();
   fs.rmSync(dataDir, { recursive: true, force: true });
 });

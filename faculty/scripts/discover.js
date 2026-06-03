@@ -178,8 +178,9 @@ function dryRunPersonalSample({ entry, profileUrl, idx }) {
 }
 
 async function processDepartment({ entry, store, fetchImpl, rateLimit, log, opts }) {
-  const result = { entry, listOk: false, profileCount: 0, chineseCount: 0, errors: [] };
+  const result = { entry, listOk: false, profileCount: 0, chineseCount: 0, errors: [], skipped: false };
   // 0a. 非 active 入口（suspected_irrelevant / access_failed / requires_manual_confirmation）→ 写 skipped 行
+  // 预期跳过：不影响 failures 计数、不影响退出码
   if (entry._kind === 'excluded') {
     const reason = entry.status === 'suspected_irrelevant'
       ? 'suspected_irrelevant: school/department not relevant to task; no faculty page to crawl'
@@ -205,10 +206,10 @@ async function processDepartment({ entry, store, fetchImpl, rateLimit, log, opts
       lastRunAt: new Date().toISOString(),
       lastRunStatus: 'skipped',
     });
-    result.errors.push('skipped');
+    result.skipped = true;
     return result;
   }
-  // 0b. needs_js 跳过（标记为 requires_js）
+  // 0b. needs_js 跳过（标记为 requires_js）— 同样为预期跳过
   if (entry.needs_js_hint && !opts.dryRun) {
     store.recordCrawlLog({
       targetKind: 'entry',
@@ -229,6 +230,7 @@ async function processDepartment({ entry, store, fetchImpl, rateLimit, log, opts
       lastRunAt: new Date().toISOString(),
       lastRunStatus: 'requires_js',
     });
+    result.skipped = true;
     return result;
   }
 
@@ -257,6 +259,7 @@ async function processDepartment({ entry, store, fetchImpl, rateLimit, log, opts
       lastRunAt: new Date().toISOString(),
       lastRunStatus: 'no_faculty_page',
     });
+    // no_list_page：active 入口但没找到教师页 — 计为真 failure
     result.errors.push('no_list_page');
     return result;
   }
@@ -447,11 +450,13 @@ async function main() {
   let profiles = 0;
   let chinese = 0;
   let failures = 0;
+  let skipped = 0;
   for (const entry of entries) {
     try {
       log(`processing ${entry.school_rank}/${entry.department_id} → ${entry.url}`);
       const r = await processDepartment({ entry, store, fetchImpl, rateLimit, log, opts: runOpts });
       processed += 1;
+      if (r.skipped) { skipped += 1; continue; } // 预期跳过不算 failure
       if (r.listOk) withList += 1;
       profiles += r.profileCount;
       chinese += r.chineseCount;
@@ -475,14 +480,22 @@ async function main() {
   store.setMeta('last_with_list', String(withList));
   store.setMeta('last_profiles', String(profiles));
   store.setMeta('last_chinese', String(chinese));
+  store.setMeta('last_skipped', String(skipped));
+  store.setMeta('last_failures', String(failures));
   store.close();
 
+  // 退出码语义：
+  //   0 = 全部 processed，无真 failure（可能含 skipped 预期跳过）
+  //   1 = 参数/输入错误（已在 loader 失败分支处理）
+  //   2 = 有真 failure（active 入口 no_list_page / 抛错等）
+  //   3 = 没有匹配到任何 entry
   console.log(JSON.stringify({
     ok: true,
     processed,
     withList,
     profiles,
     chinese,
+    skipped,
     failures,
     dataDir,
   }, null, 2));

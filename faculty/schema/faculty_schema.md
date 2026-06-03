@@ -18,14 +18,13 @@ faculty/
 │   └── faculty_schema.md        # 本文件
 ├── scripts/
 │   ├── discover.js              # 主入口：从 QS50 入口库抓取教师页
-│   ├── seed.js                  # 注入样例数据，用于 dry-run 与本地测试
 │   ├── validate.js              # 校验生成的数据库/JSONL 记录
 │   ├── lib/
 │   │   ├── loader.js            # 加载 QS50 schools / departments JSON
-│   │   ├── fetch.js             # HTTP 抓取（带重试、限速、UA）
+│   │   ├── fetch.js             # HTTP 抓取（带重试、限速、UA、gzip）
 │   │   ├── files.js             # 本地文件路径与归档
 │   │   ├── classify.js          # 识别教师列表页（基于 URL 与 HTML 特征）
-│   │   ├── extract.js           # 从列表页抽取个人主页链接
+│   │   ├── extract.js           # 从列表页抽取个人主页链接与字段
 │   │   ├── chinese.js           # 疑似华人姓名初筛（高召回）
 │   │   └── storage.js           # SQLite (node:sqlite) + JSONL 写入
 │   └── tests/
@@ -34,7 +33,9 @@ faculty/
 │       ├── classify.test.js
 │       ├── extract.test.js
 │       ├── files.test.js
-│       └── fixtures/            # 离线 HTML 测试样例
+│       ├── loader.test.js
+│       ├── storage.test.js
+│       └── discover-flow.test.js
 ├── data/                        # 运行产物（默认 .gitignore）
 │   ├── faculty.db               # SQLite 候选人/抓取日志数据库
 │   ├── crawl_log.jsonl          # 抓取状态明细（追加写）
@@ -184,7 +185,18 @@ CREATE TABLE IF NOT EXISTS department_summary (
 2. `candidates.school_rank` 必须 ∈ {1..50}；`department_id` 必须存在于 `qs50_departments.json`。
 3. 本地 HTML 路径形如 `html/<school-slug>/<dept-id>/{list/people/<slug>}/<file>.html`，相对 `faculty/data/`。
 4. 任何对 QS50 输入的写回只发生在原数据文件的 `last_validated_at` / `http_status` 字段；本模块不修改 `qs50/data/*.json`。
-5. `--dry-run` 不写文件、不发请求，但保留所有流程日志便于验收。
+5. `--dry-run` 不发请求，但仍然写入 SQLite / JSONL（用 `dryRunListSample` / `dryRunPersonalSample` 注入固定 HTML），便于 CI 验收。
+
+## 退出码语义（`discover.js` 主入口）
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 全部 `processed` 完成；无真 failure（`skipped` 预期跳过不计入） |
+| `1` | 参数错误或 `loadQs50` 失败 |
+| `2` | 至少一个 active 入口出现真 failure（`no_list_page` / 抛错等）；输出 JSON 中 `failures > 0` |
+| `3` | `--schools` / `--limit` 过滤后没有任何 entry 被选中 |
+
+`skipped`（excluded 入口审计行 + `requires_js` 跳过）属于预期路径，不计入 `failures`、不影响退出码，输出 JSON 中单独以 `skipped` 字段暴露，便于 CI 区分。
 
 ## 后续可扩展字段（不在 v1.0 范围）
 
