@@ -295,4 +295,121 @@ test('processDepartment: MIT IDSS WordPress 404 模板 → name 退到 url_slug'
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
+// --- BRA-7.3 (v2.3)：--skip-existing 断点续跑 ---
+
+test('parseArgs: --skip-existing', () => {
+  const a = parseArgs(['node', 'discover.js', '--skip-existing']);
+  assert.equal(a.skipExisting, true);
+});
+
+test('processDepartment: --skip-existing → 第二轮 personal_page URL 不重抓、不重写', async () => {
+  const loader = loadQs50({ root: REPO_ROOT });
+  const entry = loader.forRank(1).find((e) => e.department_id === 'mit-sloan');
+  assert.ok(entry);
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'faculty-skip-'));
+  const store = createStore({ dataDir, sqlite });
+
+  // 第一次：dry-run 把 list_page 与 2 个 personal_page 写入 db
+  const profileUrl1 = 'https://mitsloan.mit.edu/people/wang-xiaoming';
+  const profileUrl2 = 'https://mitsloan.mit.edu/people/jane-doe';
+  const listHtml = `<html><head><title>MIT Sloan People</title></head><body>
+<ul>
+  <li><a href="${profileUrl1}">Xiaoming Wang</a></li>
+  <li><a href="${profileUrl2}">Jane Doe</a></li>
+</ul>
+</body></html>`;
+  const profileHtml = (name) => `<html><head><title>${name}</title></head><body><h1>${name}</h1></body></html>`;
+  const fetchImpl1 = async (u) => {
+    if (u === entry.url) {
+      return { ok: true, status: 200, body: Buffer.from(listHtml, 'utf8'), bytes: listHtml.length, durationMs: 1, redirectedTo: null };
+    }
+    if (u === profileUrl1) {
+      return { ok: true, status: 200, body: Buffer.from(profileHtml('Xiaoming Wang'), 'utf8'), bytes: 100, durationMs: 1, redirectedTo: null };
+    }
+    if (u === profileUrl2) {
+      return { ok: true, status: 200, body: Buffer.from(profileHtml('Jane Doe'), 'utf8'), bytes: 100, durationMs: 1, redirectedTo: null };
+    }
+    return { ok: false, error: 'http_error', status: 404, bytes: 0, durationMs: 1, errorDetail: 'forced 404' };
+  };
+  const rateLimit = async () => undefined;
+  const log = () => undefined;
+  const opts1 = { dryRun: false, dataDir, verbose: false, maxProfiles: 5, skipExisting: false };
+  const r1 = await processDepartment({ entry, store, fetchImpl: fetchImpl1, rateLimit, log, opts: opts1 });
+  assert.equal(r1.listOk, true);
+  assert.equal(r1.profileCount, 2);
+  assert.equal(r1.skippedExisting, 0);
+
+  const candidatesBefore = store.db.prepare('SELECT COUNT(*) AS n FROM candidates').get().n;
+  assert.ok(candidatesBefore >= 3, `first run should have list_page + 2 personal_page; got ${candidatesBefore}`);
+
+  // 第二次：相同 store + skipExisting=true
+  // 期望：list_page 仍被抓（用于发现新的 profile URL），但 2 个 personal_page 不再被抓
+  const profileRequests2 = [];
+  const fetchImpl2 = async (u) => {
+    if (u === profileUrl1 || u === profileUrl2) {
+      profileRequests2.push(u);
+      throw new Error(`fetch should not be called for skip-existing profile URL: ${u}`);
+    }
+    if (u === entry.url) {
+      return { ok: true, status: 200, body: Buffer.from(listHtml, 'utf8'), bytes: listHtml.length, durationMs: 1, redirectedTo: null };
+    }
+    return { ok: false, error: 'http_error', status: 404, bytes: 0, durationMs: 1, errorDetail: 'forced 404' };
+  };
+  const opts2 = { dryRun: false, dataDir, verbose: false, maxProfiles: 5, skipExisting: true };
+  const r2 = await processDepartment({ entry, store, fetchImpl: fetchImpl2, rateLimit, log, opts: opts2 });
+  assert.equal(r2.listOk, true, 'skip-existing 模式下 list page 仍需返回 listOk=true（list 页面本身较便宜，保留以发现新 profile URL）');
+  assert.equal(r2.profileCount, 0, 'skip-existing 不应增加 profileCount');
+  assert.equal(r2.skippedExisting, 2, `skippedExisting 应为 2（仅 personal_page）; got ${r2.skippedExisting}`);
+  assert.equal(profileRequests2.length, 0, `skip-existing 不应触发 personal_page 的 fetch; called ${JSON.stringify(profileRequests2)}`);
+
+  const candidatesAfter = store.db.prepare('SELECT COUNT(*) AS n FROM candidates').get().n;
+  assert.equal(candidatesAfter, candidatesBefore, `重跑后 candidates 行数应不变; before=${candidatesBefore} after=${candidatesAfter}`);
+
+  store.close();
+  fs.rmSync(dataDir, { recursive: true, force: true });
+});
+
+test('processDepartment: --skip-existing → 上轮非 success 的 URL 仍会被重抓', async () => {
+  const loader = loadQs50({ root: REPO_ROOT });
+  const entry = loader.forRank(1).find((e) => e.department_id === 'mit-sloan');
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'faculty-skip2-'));
+  const store = createStore({ dataDir, sqlite });
+
+  const profileUrl = 'https://mitsloan.mit.edu/people/wang';
+  const listHtml = `<html><head><title>People</title></head><body>
+<ul><li><a href="${profileUrl}">Wang</a></li></ul></body></html>`;
+  // 第一次：profile 返回 200（记入 candidates + crawl_log）
+  // 然后手动把该 row 的 crawl_status 改成 'http_error' 模拟"上轮抓失败"
+  const profileHtml = '<html><body><h1>Wang</h1></body></html>';
+  const fetchImpl1 = async (u) => {
+    if (u === entry.url) return { ok: true, status: 200, body: Buffer.from(listHtml, 'utf8'), bytes: listHtml.length, durationMs: 1, redirectedTo: null };
+    if (u === profileUrl) return { ok: true, status: 200, body: Buffer.from(profileHtml, 'utf8'), bytes: profileHtml.length, durationMs: 1, redirectedTo: null };
+    return { ok: false, error: 'http_error', status: 404, bytes: 0, durationMs: 1 };
+  };
+  const rateLimit = async () => undefined;
+  const log = () => undefined;
+  await processDepartment({ entry, store, fetchImpl: fetchImpl1, rateLimit, log, opts: { dryRun: false, dataDir, verbose: false, maxProfiles: 5, skipExisting: false } });
+  // 模拟"上轮失败"：直接把该行 crawl_status 改成 http_error
+  store.db.prepare("UPDATE candidates SET crawl_status = 'http_error' WHERE source_kind = 'personal_page' AND source_url = ?").run(profileUrl);
+  assert.equal(store.getCandidateStatus('personal_page', profileUrl), 'http_error');
+
+  // 第二次：profile 200 → 应被重新抓取（因为上轮非 success）
+  let profileFetchedAgain = false;
+  const fetchImpl2 = async (u) => {
+    if (u === entry.url) return { ok: true, status: 200, body: Buffer.from(listHtml, 'utf8'), bytes: listHtml.length, durationMs: 1, redirectedTo: null };
+    if (u === profileUrl) {
+      profileFetchedAgain = true;
+      return { ok: true, status: 200, body: Buffer.from(profileHtml, 'utf8'), bytes: profileHtml.length, durationMs: 1, redirectedTo: null };
+    }
+    return { ok: false, error: 'http_error', status: 404, bytes: 0, durationMs: 1 };
+  };
+  const r2 = await processDepartment({ entry, store, fetchImpl: fetchImpl2, rateLimit, log, opts: { dryRun: false, dataDir, verbose: false, maxProfiles: 5, skipExisting: true } });
+  assert.equal(r2.skippedExisting, 0, '上轮非 success 的 profile URL 不应被 skip');
+  assert.equal(profileFetchedAgain, true, '上轮非 success 的 profile URL 应被重新抓取');
+  assert.equal(store.getCandidateStatus('personal_page', profileUrl), 'success');
+
+  store.close();
+  fs.rmSync(dataDir, { recursive: true, force: true });
+});
+
 module.exports = { tests };

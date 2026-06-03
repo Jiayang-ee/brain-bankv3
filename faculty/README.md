@@ -31,6 +31,12 @@ node faculty/scripts/discover.js --all --max-profiles 50
 # 自定义输出目录
 node faculty/scripts/discover.js --all --out /tmp/faculty-out
 
+# 断点续跑：跳过 db 中已有且上轮 success 的 personal_page URL
+node faculty/scripts/discover.js --all --skip-existing
+
+# 分批重跑（断点续跑 + 单批失败不中断后续批次）
+bash faculty/scripts/rerun-by-school.sh --schools 1,2,3,4,5 --batch-size 5
+
 # 详细日志
 node faculty/scripts/discover.js --all --dry-run --verbose
 ```
@@ -44,12 +50,12 @@ node faculty/scripts/discover.js --all --dry-run --verbose
 ## 校验
 
 ```bash
-node faculty/scripts/tests/run.js   # 84 个单元测试
+node faculty/scripts/tests/run.js   # 112 个单元测试（v2.3）
 node faculty/scripts/validate.js     # 校验跑批产出的数据
 ```
 
 期望输出末尾：
-- `84 tests, 0 failed`
+- `112 tests, 0 failed`
 - `VALIDATION OK`
 - `school coverage: 50/50 (OK)`
 
@@ -61,6 +67,7 @@ node faculty/scripts/validate.js     # 校验跑批产出的数据
 | `--schools <ranks>` | 逗号分隔的 rank 列表，如 `1,2,20` | — |
 | `--limit <N>` | 每所学校的 *active* 部门上限；`0` 不限 | 3 |
 | `--max-profiles <N>` | 每个部门最多抓取的个人主页数 | 200 |
+| `--skip-existing` | 跳过 db 中 `candidates.(source_kind, source_url)` 已存在且 `crawl_status='success'` 的 personal_page URL | off |
 | `--dry-run` | 不发请求，注入样例 HTML | off |
 | `--out <dir>` | 自定义输出目录 | `faculty/data` |
 | `--verbose` / `-v` | 详细 stderr 日志 | off |
@@ -146,6 +153,169 @@ html/<school-slug>/<dept-id>/people/<sha1[0:12]>/index.html   # 个人主页
 ```
 - `school-slug` = `qs-<rank-padded>-<slugified-name>`，跨平台、可读、不冲突。
 - 个人主页子目录用 URL 的 sha1 前 12 位命名，避免不同学校/同名教师冲突。
+
+## Runbook（BRA-7.3 真实网络抓取操作手册）
+
+> 维护方：后端开发工程师
+> 适用版本：v2.3（BRA-7.3 merge 后）
+> 适用任务：在生产网络环境跑 `--all` 时的限速 / 超时 / UA / 反爬识别 / 重跑决策
+
+本节是 [BRA-7.1](BRA-12) 真实网络冒烟 + [BRA-7.2](BRA-13) `--all` 全量抓取后沉淀下来的可执行手册。
+所有限速 / 退避 / UA 模板都以 `scripts/lib/fetch.js` 实际代码为准；如果以后改动代码，请同步更新本节。
+
+### 1. 限速档位
+
+| 维度 | 默认值 | 调优建议 |
+| --- | --- | --- |
+| **host-level 间隔** | `createRateLimiter(1500)`：同一 host 至少间隔 1.5s | 命中 429 / 403 比例 > 5% 时上调到 2500-3000ms；SSR-only 阶段 1500ms 够用 |
+| **全局并发** | 单进程串行：1 个 active 部门的所有请求都通过同一个 rate limiter | 不要 `&` 后台跑多个 `discover.js`，会绕过限速 |
+| **dry-run** | rate limiter 间隔 = 0（不延迟） | — |
+
+`scripts/lib/fetch.js` 的实现细节：`Map<host, lastHitMs>`，每次请求先 `await sleep(1500 - elapsed)`，对跨 host 的请求不串行（MIT 抓的同时可以抓 Stanford）。
+
+### 2. 重试策略
+
+`fetchWithRetry` 默认参数（在 `discover.js` 实际调用时）：
+
+| 参数 | 调用值 | 含义 |
+| --- | --- | --- |
+| `retries` | **1** | 最多重试 1 次（即总尝试 2 次） |
+| `baseDelayMs` | **300** | 第 1 次重试前等 300ms；指数退避 `300 * 2^attempt` |
+| `timeoutMs` | **12000** | 单次请求 12s 超时（fetch.js 函数默认值是 15s；discover.js 显式传 12s） |
+
+实际退避序列（含随机抖动 0-250ms）：
+- 第 1 次失败：等 `300 + rand(0..250)` ms
+- 第 2 次失败：等 `600 + rand(0..250)` ms
+
+**不重试的状态码**：4xx（`http_error` + status ∈ [400, 500)）。理由：404 / 403 / 410 不会因重试而改变；WAF 拦截 403 重复请求只会让 WAF 更坚决。
+
+**会重试的状态**：timeout / connection_reset / 5xx / dns_error（按"非 4xx 即网络问题"处理）。如果某 host DNS 持续失败，靠重试最多 2 次通常不够，应该去 `crawl_log.jsonl` 看 `error_detail` 决定是否要把 `list_url_hint` 校准到当前 200 路径（参考 v2.2 followup PR #4 做法）。
+
+### 3. UA / Referer / Accept-Language 模板
+
+`fetch.js` 中硬编码的请求头（`DEFAULT_UA` 导出，可在测试中替换）：
+
+```
+User-Agent:        brain-bankv3-faculty-crawler/1.0 (+multica; academic-research; +https://github.com/Jiayang-ee/brain-bankv3)
+Accept:            text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8
+Accept-Language:   en-US,en;q=0.8,zh-CN;q=0.6,zh;q=0.4
+Accept-Encoding:   gzip, deflate, br
+Cache-Control:     no-cache
+```
+
+- **不带 Referer**：避免对 Referer 校验产生不必要的耦合。`fetch.js` 未设置 `Referer`，目标站按 Origin 校验时会缺失，可通过 `headers` 注入覆盖（`fetchWithRetry(url, { headers: { Referer: 'https://...' } })`），但 MVP 阶段不带。
+- **Accept-Language 顺序**：英文优先、中文次之，匹配 MIT / Stanford / 清华等校双语页面的"英文路径"主流量；不要替换为 `zh-CN` 优先（会被 5% 的英文-only 站直接 404 列表）。
+- **UA 含项目身份**：`brain-bankv3-faculty-crawler/1.0` 便于目标站运维在 access log 中识别本项目；如需匿名爬取请改用 `DEFAULT_UA` 之外的 fake UA（**违反 v2.3 runbook，请走 PR review**）。
+
+### 4. 大小 / 超时
+
+| 维度 | 默认 | 触发后行为 |
+| --- | --- | --- |
+| 响应体上限 | **8 MiB** (`MAX_BYTES = 8 * 1024 * 1024`) | 超过即 `res.destroy()`，`crawl_log.status='too_large'` |
+| 请求超时 | **12s**（discover.js 调用值；fetch.js 函数默认 15s） | `req.setTimeout(12s, ...)` → `crawl_log.status='timeout'` |
+| 整次（含重试） | 最坏 ≈ 12s + 300ms + 12s + 600ms ≈ 25s | — |
+| 跨 host 重定向 | **不允许**（`cross_host_redirect` 错误） | 例如 `mit.edu` → `cloudfront.net` 一律丢弃；想跟的需改 `fetchWithRedirects` 的 host 校验 |
+
+8 MiB 是经验值：MIT 学院页偶尔含 base64 头像大图会顶到 4-5 MiB；12s 超时对北美 50 校在中美跨太平洋链路上 99% 够用（实测 P95 ≈ 4s）。
+
+### 5. 反爬识别（Cloudflare / Akamai / WAF）应对
+
+按 `--all` 全量跑（BRA-7.2）实测 `crawl_log.status` 分布（截至 2783 条 row 时）：
+
+| `status` | 占比 | 含义 / 应对 |
+| --- | --- | --- |
+| `success` | 45.9% | HTTP 2xx/3xx，HTML 已落库 |
+| `http_error` | 32.0% | 详见下表 HTTP status 分类 |
+| `cross_host_redirect` | 11.9% | 跳到不同 host，丢弃；常见于 MIT → IDSS / Stanford → CDM |
+| `dns_error` | 7.0% | DNS 解析失败；多为境外校 `.ac.uk` 临时不可达 |
+| `error` | 2.8% | 其他未分类；看 `error_detail` |
+| `timeout` | 0.3% | 12s 内未完成 |
+| `connection_reset` | 0.1% | TCP RST；目标主动断流 |
+
+`http_error` 内部按 `http_status` 细分：
+
+| HTTP status | row 数 | 处置 |
+| --- | --- | --- |
+| 404 | 485 | 列表候选路径全 404 → `department_summary.last_run_status='no_faculty_page'`，**计 1 次 failure**。常见原因：v2.1 时代 hint URL 已 stale（v2.2 followup PR #4 已校准 3 条） |
+| 301 / 302 | 330 | 已尝试跟随 ≤5 次同 host；不计入 failure |
+| 403 | 310 | **WAF / Cloudflare 拦截**。**不重试**（4xx 跳过重试）。若 `crawl_log.error_detail` 含 `cloudflare` / `akamai` / `access denied`，整部门记 `access_failed` |
+| 500 / 508 | 78 | 服务端错误；**会重试 1 次**（非 4xx）；再失败进 `error` |
+| 429 | 17 | **限速**。**当前实现不专门 backoff**——host-level 1.5s 间隔对绝大多数足够；如果跑出 429 > 1% 的 host，把它的 hint 走 `--out` 单 host 重跑并把限速调到 3000ms |
+
+**实战经验**：
+- **Stanford 子站（`gsb.stanford.edu` / `mccombs.utexas.edu`）的 403** 不需要重试——直接接受 `no_faculty_page`，把这类部门加 `qs50_departments.json` 的 `notes` 注明"403 WAF"以便人工评估是否走 headless。
+- **MIT IDSS WordPress 站**的 200 + 404 模板（`<title>Not Found – IDSS</title>`）当前由 v2.2 起的 `parseNameFromTitle` 兜底，把 name 退到 `nameFromUrlSlug`；不会污染 `name_raw` 字段。
+- **Cloudflare 5 秒盾 / JS challenge** 当前 SSR-only fetcher 无法绕过；如果单部门反复返回 200 + challenge HTML（`cf-chl-bypass` / `__cf_chl_jschl_tk__`），后续要单开 headless issue。
+
+### 6. 增量跑：跳过已有本地 HTML
+
+**`--skip-existing`**（v2.3 起，BRA-7.3）：
+
+- 仅作用于 **personal_page URL**：若 `candidates` 表中 `(source_kind='personal_page', source_url=u)` 的最新 `crawl_status='success'`，跳过本次 `fetchImpl(u)` 调用，**不重写 candidate 行**（`ON CONFLICT` 也不触发），计入输出 JSON 的 `skippedExisting` 字段。
+- **不作用于 list_page URL**：list 页面通常 < 100KB，每个部门最多 1-2 次请求；保留重抓是为了发现新增的 profile URL（学校可能在本周加新教师）。如需严格断点续跑 list 页，可手改 `findListPage` 加同款检查。
+- **不作用 active 入口选择**：仍会重跑每个 active 入口，读取 `department_summary` 决定状态。
+- **退出码语义不变**：`failures=0` → exit 0；`skippedExisting` 只在 JSON 输出中暴露，不影响退出码。
+
+端到端验证（用 `--schools 1,7 --max-profiles 3` 真实网络）：
+
+```text
+first run:  { "processed": 4, "withList": 4, "profiles": 9, "skippedExisting": 0, ... }
+second run: { "processed": 4, "withList": 4, "profiles": 0, "skippedExisting": 9, ... }
+            # candidates 行数从 13 仍是 13（不重复写入）
+```
+
+`scripts/tests/discover-flow.test.js` 中 `processDepartment: --skip-existing → 第二轮 personal_page URL 不重抓、不重写` 单测覆盖该行为。
+
+### 7. 分批重跑脚本
+
+`scripts/rerun-by-school.sh` 适合 50 校 `--all` 跑太久（2-3 小时）易被中途 WAF 拦、断网断电、需要分批验收的场景。
+
+```bash
+# 跑前 10 校，每批 5 校，断点续跑
+bash faculty/scripts/rerun-by-school.sh --schools 1,2,3,4,5,6,7,8,9,10 --batch-size 5
+
+# 跑完全 50 校（10 批 × 5 校）
+bash faculty/scripts/rerun-by-school.sh --schools 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50 --batch-size 5
+
+# 自定义输出目录 + dry-run 演练
+bash faculty/scripts/rerun-by-school.sh --schools 1,2,3,4,5 --batch-size 2 --max-profiles 3 --dry-run --out /tmp/faculty-out
+
+# 重跑特定批（断点续跑）
+bash faculty/scripts/rerun-by-school.sh --schools 1,2,3,4,5 --batch-size 5
+# 第二次执行会自动 --skip-existing 已成功条目
+```
+
+行为契约：
+
+- 按 `--batch-size`（默认 5）切分 `--schools` 列表
+- 每批调用 `node faculty/scripts/discover.js --schools <batch> --skip-existing --out <out> [其他参数]`
+- 单批失败（discover.js 退出码非 0）→ 记录批号到 `failed_batches`、继续下一批
+- 每批 stdout/stderr 写到 `<out>/crawl_log.batch-<N>.log`（discover.js 同时也写主 `crawl_log.jsonl`，重复条目因 `--skip-existing` 不会重复落 db）
+- 批末打印 summary：`batches: total=N ok=N fail=N` / `totals: processed=N profiles=N skippedExisting=N failures=N`
+- 全部成功 exit 0；任何批失败 exit 2（不阻断其他批执行，仅标记总状态）
+
+### 8. 故障排查决策树
+
+```
+python://discovery 没有写 candidates
+└── 查 crawl_log: status='no_faculty_page'  → list 候选 URL 全 404/403
+    └── 看 'http_status' 分布: 404 → hint stale（v2.2 校准 PR）
+                          403 → WAF，加 notes 注明
+    └── 查 fetch_log: 都没请求 → entry 是 excluded/requires_manual_confirmation
+
+crawl_log: 大批 dns_error
+└── 一次性临时网络问题 → 重跑
+└── 持续 → 公司出口对该 host 被墙 → 加 host 到 qs50_departments.json status='access_failed'
+
+crawl_log: 429 比例 > 1%
+└── 把该 host 的 1.5s 间隔手改到 3000ms（fetch.js createRateLimiter 调用），重跑
+└── 或对单 host 走代理
+
+crawl_log: cross_host_redirect 比例 > 15%
+└── 单 host 实际可达但被 CDN 301 → 改 listCandidatesWithHint 加 cross_host_follow 选项（需 review）
+```
+
+
 
 ## 数据契约
 
