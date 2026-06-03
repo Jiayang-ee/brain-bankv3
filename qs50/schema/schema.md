@@ -1,4 +1,8 @@
-# Schema 定义 (v2.1)
+# Schema 定义 (v1.1)
+
+> v1.1 在 v1.0 基础上新增可选字段 `list_url_hint`（BRA-15 校准）：
+> 显式教师列表页 URL hint。爬虫会先于常见后缀拼接探测此 URL，再 fallback。
+> 文档其余部分对 `qs50_schools.json` / `qs50_departments.json` 的描述保持向后兼容。
 
 ## qs50_schools.json
 
@@ -73,6 +77,7 @@
 | `category` | enum | ✅ | 见下方枚举 | 院系方向分类 |
 | `status` | enum | ✅ | 见下方枚举 | 入口当前状态 |
 | `needs_js_hint` | boolean | ✅ | — | 是否需要 headless 渲染 |
+| `list_url_hint` | string (URL) \| null | ❌ | 同 `url` host | 显式教师列表页 URL hint（v2.2 起）；爬虫会先于 `listUrlCandidates` 探测此 URL，再 fallback 到常见后缀拼接 |
 | `notes` | string | ❌ | — | 自由备注 |
 | `last_validated_at` | string (RFC3339) \| null | ✅ | 爬虫/人工回写 | 最近一次主动校验时间 |
 | `validated_by` | string \| null | ✅ | 爬虫/人工回写 | 校验方标识（agent / 人工） |
@@ -100,6 +105,7 @@ valid | requires_js | access_failed | suspected_irrelevant | requires_manual_con
 4. `url` 必须以 `http://` 或 `https://` 开头；不允许根相对路径与 `javascript:`。
 5. 任何修改 `url` / `department_id` 的操作都必须 bump `meta.version` 并在 PR/评论中说明原因。
 6. **（v2.1 起，PR #1 review fix）`category` 必须覆盖下方枚举全部 10 个值**——即 `entries[].category` 的 `Set` 必须包含 `REQUIRED_CATEGORIES = { business_school, management_school, engineering_management, industrial_engineering, systems_engineering, operations_research, decision_science, information_systems, business_analytics, public_policy }`。`validate.js` 在 CI/PR 流程中作为硬约束；新增/删除 category 必须同步更新本文件与 `validate.js`。
+7. **（v2.2 起，BRA-15 校准）`list_url_hint` 可选字段**——若填写，必须以 `http(s)://` 开头且与 `url` 同 host。`faculty/scripts/lib/classify.js` 的 `listCandidatesWithHint` 会把 `list_url_hint` 放在探测队列首位，再 fallback 到 `listUrlCandidates` 的常见后缀拼接；同一 host 多个 hint 只保留第一个去重。
 
 ## 后续可扩展字段
 

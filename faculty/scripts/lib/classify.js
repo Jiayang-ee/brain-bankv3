@@ -89,6 +89,36 @@ function listUrlCandidates(entryUrl) {
   return [...candidates];
 }
 
+// BRA-15 (v2.2)：把 list_url_hint 放在探测队列首位，再 fallback 到 listUrlCandidates。
+// 约束：hint 必须以 http(s):// 开头；与 entryUrl 同 host；非空且不是 javascript: 之类伪协议。
+// 返回的数组中 hint 总是 candidates[0]（如果有效），后续为 listUrlCandidates(entryUrl) 去重后的结果。
+function listCandidatesWithHint({ entryUrl, hint }) {
+  const out = [];
+  const seen = new Set();
+  const push = (u) => {
+    if (!u) return;
+    if (seen.has(u)) return;
+    seen.add(u);
+    out.push(u);
+  };
+  if (typeof hint === 'string' && hint.trim()) {
+    let parsedHint = null;
+    try {
+      parsedHint = new URL(hint);
+    } catch (_) { parsedHint = null; }
+    if (parsedHint && /^https?:$/.test(parsedHint.protocol)) {
+      // 必须同 host，避免跨域误投
+      let parsedEntry = null;
+      try { parsedEntry = new URL(entryUrl); } catch (_) { parsedEntry = null; }
+      if (!parsedEntry || parsedHint.host === parsedEntry.host) {
+        push(parsedHint.toString());
+      }
+    }
+  }
+  for (const u of listUrlCandidates(entryUrl)) push(u);
+  return out;
+}
+
 function urlHasListToken(rawUrl) {
   const lc = String(rawUrl).toLowerCase();
   return LIST_URL_TOKENS.some((t) => lc.includes(t));
@@ -185,6 +215,7 @@ function isProfileUrl(u) {
 
 module.exports = {
   listUrlCandidates,
+  listCandidatesWithHint,
   urlHasListToken,
   extractInternalLinks,
   scoreListPage,

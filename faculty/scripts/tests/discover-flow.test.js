@@ -180,4 +180,119 @@ test('processDepartment: active 但无 list page → errors 计入 failure', asy
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
+// --- BRA-15 (v2.2) 端到端：URL hint + 清华 DMEI + MIT IDSS WP 404 ---
+
+test('processDepartment: URL hint 优先命中（eth-dmtec / tsinghua-sem）', async () => {
+  const loader = loadQs50({ root: REPO_ROOT });
+  // 选 eth-dmtec
+  const entry = loader.byId('eth-dmtec');
+  assert.ok(entry, 'eth-dmtec entry must exist');
+  assert.equal(entry.list_url_hint, 'https://mtec.ethz.ch/people/people.html', 'hint 应当出现在 v2.2 数据中');
+
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'faculty-flow-'));
+  const store = createStore({ dataDir, sqlite });
+  const opts = { dryRun: false, dataDir, verbose: false, maxProfiles: 2 };
+
+  // 记录 fetchImpl 被请求的 URL 顺序
+  const requested = [];
+  const fetchImpl = async (u) => {
+    requested.push(u);
+    if (u === entry.list_url_hint) {
+      // 命中 hint → 返回含 list 链接的 HTML
+      const html = `<html><head><title>D-MTEC People</title></head>
+<body>
+  <h1>People</h1>
+  <ul>
+    <li><a href="/people/jane-doe">Jane Doe</a> — Professor of Management</li>
+    <li><a href="/people/john-smith">John Smith</a> — Senior Lecturer</li>
+  </ul>
+</body></html>`;
+      return { ok: true, status: 200, body: Buffer.from(html, 'utf8'), bytes: html.length, durationMs: 5, redirectedTo: null };
+    }
+    return { ok: false, error: 'http_error', status: 404, bytes: 0, durationMs: 1, errorDetail: 'forced 404 for non-hint' };
+  };
+  const rateLimit = async () => undefined;
+  const log = () => undefined;
+  const r = await processDepartment({ entry, store, fetchImpl, rateLimit, log, opts });
+  assert.equal(r.listOk, true, 'hint 命中应返回 listOk=true');
+  assert.equal(r.listUrl, entry.list_url_hint, 'listUrl 应等于 hint');
+  // 关键断言：hint 是 requested 的首个 URL
+  assert.equal(requested[0], entry.list_url_hint, `hint 应被第一个请求；got ${requested[0]}`);
+  store.close();
+  fs.rmSync(dataDir, { recursive: true, force: true });
+});
+
+test('processDepartment: tsinghua-dmei 是 requires_manual_confirmation（不调用 fetcher）', async () => {
+  const loader = loadQs50({ root: REPO_ROOT });
+  // 用 pickEntries 走真实分流，确保 _kind=excluded 与 _kind=active 区分正确
+  const a = parseArgs(['node', 'discover.js', '--all']);
+  const entries = pickEntries(loader, a);
+  const entry = entries.find((e) => e.school_rank === 20 && e.department_id === 'tsinghua-dmei');
+  assert.ok(entry, 'tsinghua-dmei entry must be picked');
+  assert.equal(entry.status, 'requires_manual_confirmation', 'v2.2 起改为 requires_manual_confirmation');
+  assert.equal(entry._kind, 'excluded', 'pickEntries 应把非 active 入口标为 excluded');
+
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'faculty-flow-'));
+  const store = createStore({ dataDir, sqlite });
+  const opts = { dryRun: false, dataDir, verbose: false, maxProfiles: 1 };
+  // 任何 fetch 调用都应触发断言失败
+  const fetchImpl = async () => { throw new Error('should not be called for requires_manual_confirmation'); };
+  const rateLimit = async () => undefined;
+  const log = () => undefined;
+  const r = await processDepartment({ entry, store, fetchImpl, rateLimit, log, opts });
+  // 关键断言：skipped 路径，不算 failure
+  assert.equal(r.skipped, true);
+  assert.equal(r.listOk, false);
+  assert.deepEqual(r.errors, [], 'requires_manual_confirmation 不应有 errors');
+  // 部门汇总行应写为 skipped
+  const dept = store.db.prepare('SELECT * FROM department_summary WHERE school_rank = ? AND department_id = ?')
+    .get(entry.school_rank, entry.department_id);
+  assert.ok(dept);
+  assert.equal(dept.last_run_status, 'skipped');
+  // 关键断言：没有 DNS 错误日志（crawl_log 中不应出现 dns_error）
+  const dnsErrors = store.db.prepare("SELECT COUNT(*) AS n FROM crawl_log WHERE status = 'dns_error'").get().n;
+  assert.equal(dnsErrors, 0, 'requires_manual_confirmation 不应产生 dns_error 日志');
+  store.close();
+  fs.rmSync(dataDir, { recursive: true, force: true });
+});
+
+test('processDepartment: MIT IDSS WordPress 404 模板 → name 退到 url_slug', async () => {
+  const loader = loadQs50({ root: REPO_ROOT });
+  // mit-idss-cm 是 active 入口，方便构造场景
+  const entry = loader.byId('mit-idss-cm');
+  assert.ok(entry, 'mit-idss-cm entry must exist');
+
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'faculty-flow-'));
+  const store = createStore({ dataDir, sqlite });
+  const opts = { dryRun: false, dataDir, verbose: false, maxProfiles: 1 };
+
+  // 模拟：list 页面正常返回 1 条 profile 链接；该 profile 返回 WP 404 模板
+  const profileUrl = 'https://idss.mit.edu/people/victor-chernozhukov';
+  const fetchImpl = async (u) => {
+    if (u === entry.url || u === entry.list_url_hint) {
+      const html = `<html><head><title>IDSS People</title></head><body>
+<ul><li><a href="${profileUrl}">Victor</a></li></ul>
+</body></html>`;
+      return { ok: true, status: 200, body: Buffer.from(html, 'utf8'), bytes: html.length, durationMs: 5, redirectedTo: null };
+    }
+    if (u === profileUrl) {
+      // WP 404 模板：HTTP 200，但 h1/og/author 全缺失，title="Not Found – IDSS"
+      const html = `<html><head><title>Not Found &#8211; IDSS</title></head><body></body></html>`;
+      return { ok: true, status: 200, body: Buffer.from(html, 'utf8'), bytes: html.length, durationMs: 5, redirectedTo: null };
+    }
+    return { ok: false, error: 'http_error', status: 404, bytes: 0, durationMs: 1, errorDetail: 'forced 404' };
+  };
+  const rateLimit = async () => undefined;
+  const log = () => undefined;
+  const r = await processDepartment({ entry, store, fetchImpl, rateLimit, log, opts });
+  assert.equal(r.listOk, true);
+  // 关键断言：name 不是 "Not Found"，而是从 URL slug 推出
+  const row = store.db.prepare("SELECT * FROM candidates WHERE source_url = ?").get(profileUrl);
+  assert.ok(row, 'candidate row should exist');
+  assert.equal(row.name_raw, 'Victor Chernozhukov', `name_raw 应当是 url_slug 推出的姓名；got "${row.name_raw}"`);
+  assert.notEqual(row.name_raw, 'Not Found', '绝不能把 "Not Found" 落库为姓名');
+  store.close();
+  fs.rmSync(dataDir, { recursive: true, force: true });
+});
+
 module.exports = { tests };

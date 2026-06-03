@@ -95,4 +95,58 @@ test('isProfileUrl: /research/publication → false', () => {
   assert.equal(isProfileUrl('https://x.edu/research/publication'), false);
 });
 
+// --- BRA-15 (v2.2) ---
+
+test('listCandidatesWithHint: hint 优先且去重', () => {
+  const { listCandidatesWithHint } = require('../lib/classify.js');
+  const cs = listCandidatesWithHint({
+    entryUrl: 'https://mtec.ethz.ch/',
+    hint: 'https://mtec.ethz.ch/people/people.html',
+  });
+  // hint 必须是 candidates[0]
+  assert.equal(cs[0], 'https://mtec.ethz.ch/people/people.html');
+  // 后续保留 listUrlCandidates 的常见后缀
+  assert.ok(cs.includes('https://mtec.ethz.ch/people'));
+  assert.ok(cs.includes('https://mtec.ethz.ch/faculty'));
+  // 整列无重复
+  assert.equal(new Set(cs).size, cs.length);
+});
+
+test('listCandidatesWithHint: 无 hint 时退化为 listUrlCandidates', () => {
+  const { listCandidatesWithHint, listUrlCandidates: l } = require('../lib/classify.js');
+  const cs = listCandidatesWithHint({ entryUrl: 'https://mtec.ethz.ch/', hint: null });
+  const baseCs = l('https://mtec.ethz.ch/');
+  assert.deepEqual(cs, baseCs);
+});
+
+test('listCandidatesWithHint: hint 跨 host 时被丢弃', () => {
+  const { listCandidatesWithHint } = require('../lib/classify.js');
+  const cs = listCandidatesWithHint({
+    entryUrl: 'https://mtec.ethz.ch/',
+    hint: 'https://other.example.com/people',
+  });
+  // hint 应被丢弃；candidates[0] 退化为 entryUrl 本身
+  assert.equal(cs[0], 'https://mtec.ethz.ch/');
+  assert.equal(cs.includes('https://other.example.com/people'), false);
+});
+
+test('listCandidatesWithHint: hint 非 http(s) 时被丢弃', () => {
+  const { listCandidatesWithHint } = require('../lib/classify.js');
+  const cs = listCandidatesWithHint({
+    entryUrl: 'https://mtec.ethz.ch/',
+    hint: 'javascript:alert(1)',
+  });
+  assert.equal(cs.includes('javascript:alert(1)'), false);
+  assert.equal(cs[0], 'https://mtec.ethz.ch/');
+});
+
+test('listCandidatesWithHint: hint 形如空字符串或未传 → 退化', () => {
+  const { listCandidatesWithHint, listUrlCandidates: l } = require('../lib/classify.js');
+  const a = listCandidatesWithHint({ entryUrl: 'https://mtec.ethz.ch/', hint: '' });
+  const b = listCandidatesWithHint({ entryUrl: 'https://mtec.ethz.ch/' });
+  const base = l('https://mtec.ethz.ch/');
+  assert.deepEqual(a, base);
+  assert.deepEqual(b, base);
+});
+
 module.exports = { tests };

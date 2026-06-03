@@ -87,6 +87,8 @@ node faculty/scripts/validate.js     # 校验跑批产出的数据
 
 命中阈值 0.65 后停止，避免对单部门做 30+ 次请求。
 
+**v2.2 起（BRA-15）显式 hint 优先**：`qs50_departments.json` 的可选字段 `list_url_hint` 会被 `listCandidatesWithHint` 放在探测队列首位（与入口同 host），再 fallback 到上面的常见后缀拼接。hint 尝试的 200/404/超时等会写入 `crawl_log`，便于人工核查"为什么命中 hint 后还能 no_list_page"。
+
 ### 2. 个人主页抽取（无定制 selector）
 
 `scripts/lib/extract.js`：
@@ -94,6 +96,8 @@ node faculty/scripts/validate.js     # 校验跑批产出的数据
 - 邮箱用 `findEmails` 正则抓全部并去重。
 - 职位关键词集合：Assistant / Associate / Full Professor、Tenure-Track、Lecturer、Research Scientist、Postdoctoral、PhD Student、Chair Professor、Dean、Director 等。
 - CJK 片段提取：对每个连续 CJK run 切 2-4 字窗口，便于中文姓名识别。
+
+**v2.2 起（BRA-15）姓名兜底**：`pickBestName` 按 h1 > og:title > meta author > `parseNameFromTitle(title)` > `nameFromUrlSlug(url)` 顺序选最干净的姓名。`parseNameFromTitle` 会先把 HTML 实体（`&#8211;` 等）解回字符，再去掉 `| / – / —` 之后的后缀；如果清洗结果是 `Not Found / 404 / Page Not Found` 等 WP/404 模板词，返回 `null`。最后 `nameFromUrlSlug` 在 URL 含 `/people/ /person/ /faculty/` 等 token 且末段长度 ≥ 3 时，从 slug 推出 Title-case 姓名（不会把列表页 slug 误投成人名）。
 
 ### 3. 华人姓名初筛（高召回）
 

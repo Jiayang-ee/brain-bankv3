@@ -22,8 +22,8 @@ const sqlite = require('node:sqlite');
 
 const { loadQs50, activeEntries, isKnownCategory } = require('./lib/loader.js');
 const { fetchWithRetry, createRateLimiter } = require('./lib/fetch.js');
-const { listUrlCandidates, scoreListPage, extractProfileLinks, extractInternalLinks, isProfileUrl } = require('./lib/classify.js');
-const { extractPersonalInfo } = require('./lib/extract.js');
+const { listUrlCandidates, listCandidatesWithHint, scoreListPage, extractProfileLinks, extractInternalLinks, isProfileUrl } = require('./lib/classify.js');
+const { extractPersonalInfo, pickBestName } = require('./lib/extract.js');
 const { looksChinese } = require('./lib/chinese.js');
 const { createStore } = require('./lib/storage.js');
 const { htmlRelPath, writeArchive, relToPosix } = require('./lib/files.js');
@@ -93,8 +93,8 @@ async function findListPage({ entry, fetchImpl, rateLimit, log, dryRun }) {
     // dry-run 模式：直接用样例，跳过真实网络
     return { best: dryRunListSample(entry), tried: [] };
   }
-  const candidates = listUrlCandidates(entry.url);
-  log(`list candidates for ${entry.department_id}: ${candidates.length}`);
+  const candidates = listCandidatesWithHint({ entryUrl: entry.url, hint: entry.list_url_hint });
+  log(`list candidates for ${entry.department_id}: ${candidates.length}${entry.list_url_hint ? ` (hint=${entry.list_url_hint})` : ''}`);
   const tried = [];
   let best = null;
   for (let i = 0; i < candidates.length; i += 1) {
@@ -355,8 +355,10 @@ async function processDepartment({ entry, store, fetchImpl, rateLimit, log, opts
       body: Buffer.from(html, 'utf8'),
     });
     const rel = relToPosix(path.relative(opts.dataDir, arch.absPath));
-    // 姓名取 h1 > og:title > meta author
-    const nameRaw = info.h1 || info.meta.ogTitle || info.meta.author || (info.title ? info.title.split(/[|·•\-]/)[0].trim() : null);
+    // BRA-15 (v2.2)：姓名兜底。h1 > og:title > meta author > title 清洗（识别 NOT_FOUND 模板）> URL slug
+    const namePick = pickBestName({ meta: { __h1: info.h1, __title: info.title, 'og:title': info.meta.ogTitle, author: info.meta.author }, url: profileUrl });
+    const nameRaw = namePick.value;
+    log(`name for ${profileUrl}: source=${namePick.source} value=${nameRaw}`);
     const titleRaw = info.titleKeyword || null;
     const emailRaw = info.emails[0] || null;
     const cjk = info.cjkFragments;
