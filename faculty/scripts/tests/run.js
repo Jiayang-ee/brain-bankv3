@@ -17,6 +17,12 @@ const testFiles = [
   './loader.test.js',
   './storage.test.js',
   './discover-flow.test.js',
+  './photos.test.js',
+  './photos-flow.test.js',
+  './papers_csv.test.js',
+  './paper_extract.test.js',
+  './papers_flow.test.js',
+  './email_extract.test.js',
 ];
 
 let totalRun = 0;

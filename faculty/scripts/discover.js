@@ -8,7 +8,6 @@
 //   node faculty/scripts/discover.js --limit 10       # 每个 school 最多处理 10 个部门
 //   node faculty/scripts/discover.js --dry-run        # 不发请求，写入样例候选
 //   node faculty/scripts/discover.js --out /tmp/out    # 自定义输出目录
-//   node faculty/scripts/discover.js --skip-existing  # 断点续跑：跳过 db 中已有且 success 的 (source_kind, source_url)
 //   node faculty/scripts/discover.js --verbose        # 详细日志
 //
 // 退出码：0=ok；1=参数/输入错误；2=部分失败但有进展；3=全部失败。
@@ -23,20 +22,19 @@ const sqlite = require('node:sqlite');
 
 const { loadQs50, activeEntries, isKnownCategory } = require('./lib/loader.js');
 const { fetchWithRetry, createRateLimiter } = require('./lib/fetch.js');
-const { listUrlCandidates, listCandidatesWithHint, scoreListPage, extractProfileLinks, extractInternalLinks, isProfileUrl } = require('./lib/classify.js');
-const { extractPersonalInfo, pickBestName } = require('./lib/extract.js');
+const { listUrlCandidates, scoreListPage, extractProfileLinks, extractInternalLinks, isProfileUrl } = require('./lib/classify.js');
+const { extractPersonalInfo } = require('./lib/extract.js');
 const { looksChinese } = require('./lib/chinese.js');
 const { createStore } = require('./lib/storage.js');
 const { htmlRelPath, writeArchive, relToPosix } = require('./lib/files.js');
 
 function parseArgs(argv) {
-  const out = { verbose: false, dryRun: false, limit: 3, limitSet: false, schools: null, all: false, out: null, maxProfiles: 200, skipExisting: false };
+  const out = { verbose: false, dryRun: false, limit: 3, limitSet: false, schools: null, all: false, out: null, maxProfiles: 200 };
   for (let i = 2; i < argv.length; i += 1) {
     const a = argv[i];
     if (a === '--verbose' || a === '-v') out.verbose = true;
     else if (a === '--dry-run') out.dryRun = true;
     else if (a === '--all') out.all = true;
-    else if (a === '--skip-existing') out.skipExisting = true;
     else if (a === '--schools') { out.schools = argv[++i].split(',').map((s) => Number(s.trim())); }
     else if (a === '--limit') { out.limit = Number(argv[++i]); out.limitSet = true; }
     else if (a === '--max-profiles') { out.maxProfiles = Number(argv[++i]); }
@@ -90,13 +88,13 @@ function candidateId({ kind, sourceUrl }) {
   return crypto.createHash('sha1').update(`${kind}|${sourceUrl}`).digest('hex');
 }
 
-async function findListPage({ entry, fetchImpl, rateLimit, log, dryRun, store, skipExisting }) {
+async function findListPage({ entry, fetchImpl, rateLimit, log, dryRun }) {
   if (dryRun) {
     // dry-run 模式：直接用样例，跳过真实网络
     return { best: dryRunListSample(entry), tried: [] };
   }
-  const candidates = listCandidatesWithHint({ entryUrl: entry.url, hint: entry.list_url_hint });
-  log(`list candidates for ${entry.department_id}: ${candidates.length}${entry.list_url_hint ? ` (hint=${entry.list_url_hint})` : ''}`);
+  const candidates = listUrlCandidates(entry.url);
+  log(`list candidates for ${entry.department_id}: ${candidates.length}`);
   const tried = [];
   let best = null;
   for (let i = 0; i < candidates.length; i += 1) {
@@ -163,14 +161,19 @@ function dryRunPersonalSample({ entry, profileUrl, idx }) {
     { name: 'Meng Zhao', title: 'PhD Student in Management Science', cjk: '赵萌' },
   ];
   const pick = names[idx % names.length];
+  // BRA-8: 在样例 HTML 里插入 <meta og:image> + <img class=headshot>，让 photos.js dry-run
+  // 走完整抽取→下载→落盘链路（fake fetch 会拦截 *.jpg 返回 1x1 PNG）
+  const photoUrl = `${entry.url.replace(/\/$/, '')}/photos/${pick.name.toLowerCase().replace(/\s+/g, '-')}.jpg`;
   const html = `<!doctype html>
 <html><head>
   <title>${pick.name} | ${entry.department_name_en}</title>
   <meta name="author" content="${pick.name}">
   <meta name="description" content="${pick.title}">
+  <meta property="og:image" content="${photoUrl}">
 </head>
 <body>
   <h1>${pick.name}</h1>
+  <img class="headshot profile-photo" src="${photoUrl}" alt="${pick.name} headshot" width="200" height="200">
   <p class="title">${pick.title}</p>
   <p>Email: <a href="mailto:${pick.name.toLowerCase().replace(/\s+/g, '.')}@example.edu">${pick.name.toLowerCase().replace(/\s+/g, '.')}@example.edu</a></p>
   <p>${pick.cjk || ''}</p>
@@ -180,7 +183,7 @@ function dryRunPersonalSample({ entry, profileUrl, idx }) {
 }
 
 async function processDepartment({ entry, store, fetchImpl, rateLimit, log, opts }) {
-  const result = { entry, listOk: false, profileCount: 0, chineseCount: 0, errors: [], skipped: false, skippedExisting: 0 };
+  const result = { entry, listOk: false, profileCount: 0, chineseCount: 0, errors: [], skipped: false };
   // 0a. 非 active 入口（suspected_irrelevant / access_failed / requires_manual_confirmation）→ 写 skipped 行
   // 预期跳过：不影响 failures 计数、不影响退出码
   if (entry._kind === 'excluded') {
@@ -306,12 +309,6 @@ async function processDepartment({ entry, store, fetchImpl, rateLimit, log, opts
   log(`profiles for ${entry.department_id}: ${profileUrls.length}, fetching first ${limited.length}`);
   for (let i = 0; i < limited.length; i += 1) {
     const profileUrl = limited[i];
-    // --skip-existing：profile URL 已在 db 中且上轮 success → 不发请求、不落库
-    if (opts.skipExisting && store.getCandidateStatus('personal_page', profileUrl) === 'success') {
-      result.skippedExisting += 1;
-      log(`skip-existing: ${profileUrl}`);
-      continue;
-    }
     let host = '';
     try { host = new URL(profileUrl).host; } catch (_) { /* ignore */ }
     await rateLimit(host);
@@ -363,10 +360,8 @@ async function processDepartment({ entry, store, fetchImpl, rateLimit, log, opts
       body: Buffer.from(html, 'utf8'),
     });
     const rel = relToPosix(path.relative(opts.dataDir, arch.absPath));
-    // BRA-15 (v2.2)：姓名兜底。h1 > og:title > meta author > title 清洗（识别 NOT_FOUND 模板）> URL slug
-    const namePick = pickBestName({ meta: { __h1: info.h1, __title: info.title, 'og:title': info.meta.ogTitle, author: info.meta.author }, url: profileUrl });
-    const nameRaw = namePick.value;
-    log(`name for ${profileUrl}: source=${namePick.source} value=${nameRaw}`);
+    // 姓名取 h1 > og:title > meta author
+    const nameRaw = info.h1 || info.meta.ogTitle || info.meta.author || (info.title ? info.title.split(/[|·•\-]/)[0].trim() : null);
     const titleRaw = info.titleKeyword || null;
     const emailRaw = info.emails[0] || null;
     const cjk = info.cjkFragments;
@@ -461,7 +456,6 @@ async function main() {
   let chinese = 0;
   let failures = 0;
   let skipped = 0;
-  let skippedExisting = 0;
   for (const entry of entries) {
     try {
       log(`processing ${entry.school_rank}/${entry.department_id} → ${entry.url}`);
@@ -471,7 +465,6 @@ async function main() {
       if (r.listOk) withList += 1;
       profiles += r.profileCount;
       chinese += r.chineseCount;
-      skippedExisting += r.skippedExisting || 0;
       if (r.errors.length) failures += 1;
     } catch (err) {
       failures += 1;
@@ -493,9 +486,7 @@ async function main() {
   store.setMeta('last_profiles', String(profiles));
   store.setMeta('last_chinese', String(chinese));
   store.setMeta('last_skipped', String(skipped));
-  store.setMeta('last_skipped_existing', String(skippedExisting));
   store.setMeta('last_failures', String(failures));
-  store.setMeta('skip_existing', String(!!opts.skipExisting));
   store.close();
 
   // 退出码语义：
@@ -510,7 +501,6 @@ async function main() {
     profiles,
     chinese,
     skipped,
-    skippedExisting,
     failures,
     dataDir,
   }, null, 2));

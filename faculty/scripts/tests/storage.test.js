@@ -146,27 +146,106 @@ test('createStore: jsonl 落盘可读', () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('createStore: getCandidateStatus — 给 --skip-existing 用', () => {
+// --- BRA-8 headshot 列与 helpers ---
+
+function seedHeadshotCandidate(store, { id, sourceUrl, headshotStatus = null } = {}) {
+  store.recordCandidate({
+    id,
+    schoolRank: 1, schoolNameEn: 'MIT', departmentId: 'd',
+    departmentNameEn: 'D', category: 'business_school',
+    sourceKind: 'personal_page', sourceUrl,
+    sourceListUrl: 'https://x/people',
+    localPath: `html/x/d/people/${id}/index.html`,
+    nameRaw: 'Wang', chineseNameProbability: 0.5,
+    crawlStatus: 'success',
+  });
+  if (headshotStatus) {
+    store.recordHeadshot({
+      id,
+      headshotUrl: 'https://x/p.jpg',
+      headshotLocalPath: `html/x/d/people/${id}/photo/x.jpg`,
+      headshotContentType: 'image/jpeg',
+      headshotBytes: 1234,
+      headshotCrawlStatus: headshotStatus,
+    });
+  }
+}
+
+test('createStore: headshot 列存在 + 写回可读', () => {
   const { dir, store } = makeTmpStore();
-  // 没记录时返回 null
-  assert.equal(store.getCandidateStatus('personal_page', 'https://x/missing'), null);
-  // 写入 success
+  seedHeadshotCandidate(store, { id: 'h1', sourceUrl: 'https://x/p1', headshotStatus: 'success' });
+  const r = store.db.prepare('SELECT headshot_url, headshot_local_path, headshot_content_type, headshot_bytes, headshot_crawl_status FROM candidates WHERE id = ?').get('h1');
+  assert.equal(r.headshot_url, 'https://x/p.jpg');
+  assert.equal(r.headshot_bytes, 1234);
+  assert.equal(r.headshot_crawl_status, 'success');
+  store.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('createStore: ensureColumn 幂等 (再开一次 store 不会报错)', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'faculty-store-'));
+  const s1 = createStore({ dataDir: dir, sqlite });
+  s1.close();
+  // 第二次开同一个 db；ensureColumn 命中"已存在"分支
+  const s2 = createStore({ dataDir: dir, sqlite });
+  s2.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('createStore: selectPhotoCandidates 默认跳过已 success', () => {
+  const { dir, store } = makeTmpStore();
+  seedHeadshotCandidate(store, { id: 'h1', sourceUrl: 'https://x/p1', headshotStatus: 'success' });
+  seedHeadshotCandidate(store, { id: 'h2', sourceUrl: 'https://x/p2' });
+  const rows = store.selectPhotoCandidates({});
+  const ids = rows.map((r) => r.id);
+  assert.ok(!ids.includes('h1'), '已 success 的不应被默认选中');
+  assert.ok(ids.includes('h2'), '未处理的应被选中');
+  store.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('createStore: selectPhotoCandidates --force 重跑', () => {
+  const { dir, store } = makeTmpStore();
+  seedHeadshotCandidate(store, { id: 'h1', sourceUrl: 'https://x/p1', headshotStatus: 'success' });
+  const rows = store.selectPhotoCandidates({ force: true });
+  assert.ok(rows.find((r) => r.id === 'h1'));
+  store.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('createStore: selectPhotoCandidates 按 school_rank 过滤', () => {
+  const { dir, store } = makeTmpStore();
   store.recordCandidate({
-    id: 's1', schoolRank: 1, schoolNameEn: 'MIT', departmentId: 'd',
-    departmentNameEn: 'D', category: 'business_school', sourceKind: 'personal_page',
-    sourceUrl: 'https://x/y', nameRaw: 'Wang', chineseNameProbability: 0.8, crawlStatus: 'success',
+    id: 'a', schoolRank: 1, schoolNameEn: 'A', departmentId: 'd',
+    departmentNameEn: 'D', category: 'business_school',
+    sourceKind: 'personal_page', sourceUrl: 'https://x/1',
+    localPath: 'html/a/d/people/a/index.html', nameRaw: 'A', chineseNameProbability: 0, crawlStatus: 'success',
   });
-  assert.equal(store.getCandidateStatus('personal_page', 'https://x/y'), 'success');
-  // 写入 http_error
   store.recordCandidate({
-    id: 's2', schoolRank: 1, schoolNameEn: 'MIT', departmentId: 'd',
-    departmentNameEn: 'D', category: 'business_school', sourceKind: 'personal_page',
-    sourceUrl: 'https://x/y', nameRaw: 'Wang', chineseNameProbability: 0.8, crawlStatus: 'http_error',
+    id: 'b', schoolRank: 2, schoolNameEn: 'B', departmentId: 'd',
+    departmentNameEn: 'D', category: 'business_school',
+    sourceKind: 'personal_page', sourceUrl: 'https://x/2',
+    localPath: 'html/b/d/people/b/index.html', nameRaw: 'B', chineseNameProbability: 0, crawlStatus: 'success',
   });
-  // 第二次写入是 upsert，所以 success 被 http_error 覆盖
-  assert.equal(store.getCandidateStatus('personal_page', 'https://x/y'), 'http_error');
-  // 不同 source_kind 互不影响
-  assert.equal(store.getCandidateStatus('list_page', 'https://x/y'), null);
+  const rows = store.selectPhotoCandidates({ schoolRank: 1 });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].id, 'a');
+  store.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('createStore: getHeadshotStats 正确分类', () => {
+  const { dir, store } = makeTmpStore();
+  seedHeadshotCandidate(store, { id: 'h1', sourceUrl: 'https://x/p1', headshotStatus: 'success' });
+  seedHeadshotCandidate(store, { id: 'h2', sourceUrl: 'https://x/p2', headshotStatus: 'no_photo' });
+  seedHeadshotCandidate(store, { id: 'h3', sourceUrl: 'https://x/p3', headshotStatus: 'anti_leech_suspected' });
+  seedHeadshotCandidate(store, { id: 'h4', sourceUrl: 'https://x/p4' });
+  const stats = store.getHeadshotStats();
+  assert.equal(stats.distribution.success, 1);
+  assert.equal(stats.distribution.no_photo, 1);
+  assert.equal(stats.distribution.anti_leech_suspected, 1);
+  assert.equal(stats.totals.total, 4);
+  assert.equal(stats.totals.success, 1);
   store.close();
   fs.rmSync(dir, { recursive: true, force: true });
 });

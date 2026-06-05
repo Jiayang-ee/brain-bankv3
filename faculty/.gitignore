@@ -6,6 +6,19 @@ data/html/
 data/*.tmp
 data/*.bak
 
+# BRA-9 真实全量查询数据（~700 MB，留在 workdir；持久化走 GitHub Release）
+# 子目录内 SUMMARY.md / .gitkeep 不在以下列表里，会被 git 跟踪
+data/real-*/faculty.db
+data/real-*/papers.jsonl
+data/real-*/paper_authors.jsonl
+data/real-*/journals.jsonl
+data/real-*/crawl_log.jsonl
+data/real-*/faculty.db-journal
+data/real-*/faculty.db-wal
+data/real-*/faculty.db-shm
+data/real-*.tmp
+data/real-*.bak
+
 # 编辑器 / 系统
 .DS_Store
 .idea/
