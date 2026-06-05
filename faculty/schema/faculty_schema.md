@@ -1,10 +1,10 @@
-# Faculty Crawler Schema (v1.1)
+# Faculty Crawler Schema (v1.2)
 
 > 维护方：后端开发工程师 (multica-agent: `a96a336b`)
-> 适用任务：BRA-7 学校官网教师页入口发现与本地归档爬虫 / BRA-8 教师照片下载与抓取状态日志
-> 数据版本：v1.1
-> 关联输入：`qs50/data/qs50_schools.json` (v1.0) + `qs50/data/qs50_departments.json` (v2.1)
-> 关联下游：BRA-9（期刊作者）、BRA-10（人工审核查看器）
+> 适用任务：BRA-7 学校官网教师页入口发现与本地归档爬虫 / BRA-8 教师照片下载与抓取状态日志 / BRA-9 期刊论文 API 查询与华人姓名高召回初筛
+> 数据版本：v1.2
+> 关联输入：`qs50/data/qs50_schools.json` (v1.0) + `qs50/data/qs50_departments.json` (v2.1) + `faculty/data/journals.csv`（BRA-9 附件）
+> 关联下游：BRA-10（人工审核查看器）
 
 本目录是 `BRA-7` 任务的交付物。爬虫以 `qs50/data` 为入口库，发现并归档 QS50
 相关院系的教师列表页与个人主页 HTML，并对候选教师姓名执行高召回疑似华人初筛。
@@ -243,3 +243,134 @@ CREATE TABLE IF NOT EXISTS department_summary (
 - 新增测试 `photos.test.js` / `photos-flow.test.js`（+50 个测试用例）
 - `crawl_log` 表的 `target_kind` 现支持 `headshot`（沿用同一表，区分 photo 事件）
 - 抓取日志可区分页面失败和图片失败（同一行 `status` 字段携带不同 `target_kind`）
+
+## v1.2 变更（BRA-9）
+
+- 新增 3 张表：`journals` / `papers` / `paper_authors`
+  - `journals` 字段：附件 CSV 8 列原文 + 解析后的 `issn_print` / `issn_electronic` / `issn_l` / `cn_code` + OpenAlex 源 ID + 5 个查询状态统计列
+  - `papers` 字段：DOI、OpenAlex Work ID、标题、journal_id、出版年/月/日、卷期页、引用数、数据源、源 URL
+  - `paper_authors` 字段：作者名、position、3 个布尔位（first/last/corresponding）、机构名/ID、ORCID、3 个华人初筛字段、`is_target_candidate` 标志
+- `papers.id` 唯一键：DOI 存在时 = `doi:<lowercased>`；否则 = `sha1:` + sha1(source|normalized_title|year|journal_id) 前 32 hex
+- `paper_authors.id` 唯一键：sha1(paper_id|author_position|normalized_name) — 同位置同人重抓幂等
+- 新增脚本 `faculty/scripts/papers.js` 与模块 `faculty/scripts/lib/{papers_csv,openalex,crossref,paper_extract}.js`
+- 新增测试 `papers_csv.test.js` / `paper_extract.test.js` / `papers_flow.test.js`（+40 个测试用例）
+- 新增 3 个 JSONL：`journals.jsonl` / `papers.jsonl` / `paper_authors.jsonl`
+- `crawl_log` 表的 `target_kind` 现支持 `journal`（沿用同一表）
+
+### `journals` 表（BRA-9 引入）
+
+每行一个 CSV 期刊条目 + 解析后的源 ID + 查询结果统计。id = sha1(source_file|journal_name|issn_canonical|cn_canonical)。
+
+```sql
+CREATE TABLE IF NOT EXISTS journals (
+  id                    TEXT PRIMARY KEY,
+  source_file           TEXT    NOT NULL,         -- CSV 的 "来源文件" 字段
+  journal_system        TEXT,                     -- 中文期刊 / 英文期刊
+  discipline            TEXT,                     -- 学科/方向
+  journal_name_raw      TEXT    NOT NULL,         -- 期刊名称原文（CSV）
+  journal_name_en       TEXT,                     -- 规范化后的英文名（OpenAlex 解析后回填）
+  issn_raw              TEXT,                     -- CSV 的 "ISSN/CN" 字段原文
+  issn_print            TEXT,                     -- 解析后的 print-ISSN（去横线）
+  issn_electronic       TEXT,                     -- 解析后的 electronic-ISSN
+  issn_l                TEXT,                     -- OpenAlex/Crossref 解析后的 linking-ISSN
+  cn_code               TEXT,                     -- 中文期刊的 CN 号（11-1235/F 等）
+  school_level          TEXT,                     -- A+/A/A1/A2
+  usage                 TEXT,                     -- 人才库用途
+  notes                 TEXT,                     -- 备注
+  openalex_source_id    TEXT,                     -- OpenAlex source ID (S...)
+  crossref_issn         TEXT,                     -- Crossref 用的 ISSN
+  query_status          TEXT,                     -- 'success' | 'no_results' | 'api_unsupported' | 'manual_required' | 'failed'
+  papers_found          INTEGER NOT NULL DEFAULT 0,
+  papers_kept           INTEGER NOT NULL DEFAULT 0,
+  authors_found         INTEGER NOT NULL DEFAULT 0,
+  authors_chs           INTEGER NOT NULL DEFAULT 0,
+  authors_target        INTEGER NOT NULL DEFAULT 0,  -- 一作/通讯作者 + 疑似华人
+  last_query_at         TEXT,
+  error_detail          TEXT,
+  first_seen_at         TEXT    NOT NULL,
+  last_seen_at          TEXT    NOT NULL
+);
+```
+
+### `papers` 表（BRA-9 引入）
+
+每行一个 paper，按 DOI 唯一（缺失时退化到 sha1）。journal_id 关联 journals.id。
+
+```sql
+CREATE TABLE IF NOT EXISTS papers (
+  id                TEXT PRIMARY KEY,            -- doi 不为空时 = 'doi:'+lowercase_doi；否则 sha1(source|normalized_title|year|journal_id).slice(0,32)
+  doi               TEXT,
+  openalex_id       TEXT,                        -- OpenAlex Work ID (W...)
+  title             TEXT    NOT NULL,
+  journal_id        TEXT    NOT NULL,
+  journal_name      TEXT    NOT NULL,            -- 冗余方便 join-less 查询
+  issn              TEXT,
+  publish_year      INTEGER,
+  publish_date      TEXT,                        -- ISO8601 'YYYY-MM-DD'
+  volume            TEXT,
+  issue             TEXT,
+  page              TEXT,                        -- 形如 "100-120"
+  paper_type        TEXT,                        -- 'article' | 'review' | 'letter' | ...
+  cited_by_count    INTEGER,
+  language          TEXT,                        -- 'en' | 'zh' | ...
+  source            TEXT    NOT NULL,            -- 'openalex' | 'crossref'
+  source_url        TEXT,
+  first_seen_at     TEXT    NOT NULL,
+  last_seen_at      TEXT    NOT NULL
+);
+```
+
+### `paper_authors` 表（BRA-9 引入）
+
+每个 authorships 一行。`is_target_candidate = (is_first_author OR is_last_author OR is_corresponding) AND chinese_name_probability >= chinese_threshold`（默认 0.4）。
+
+```sql
+CREATE TABLE IF NOT EXISTS paper_authors (
+  id                        TEXT PRIMARY KEY,
+  paper_id                  TEXT    NOT NULL,
+  author_name               TEXT    NOT NULL,
+  author_position           INTEGER NOT NULL,
+  is_first_author           INTEGER NOT NULL DEFAULT 0,
+  is_last_author            INTEGER NOT NULL DEFAULT 0,
+  is_corresponding          INTEGER NOT NULL DEFAULT 0,
+  affiliation_raw           TEXT,
+  affiliation_id            TEXT,
+  affiliation_name          TEXT,
+  orcid                     TEXT,
+  chinese_name_probability  REAL    DEFAULT 0,
+  chinese_name_reasons      TEXT,                -- JSON array
+  chinese_name_negatives    TEXT,                -- JSON array
+  is_target_candidate       INTEGER NOT NULL DEFAULT 0,
+  first_seen_at             TEXT    NOT NULL,
+  last_seen_at              TEXT    NOT NULL
+);
+```
+
+### `journals.query_status` 枚举（BRA-9 引入）
+
+| 值 | 含义 |
+| --- | --- |
+| `success` | 至少 1 篇 paper 落库（含 in_range 过滤后） |
+| `no_results` | API 调用成功但 0 结果（期刊 ID 找不到 / 5 年范围无 paper） |
+| `api_unsupported` | 期刊无 print-ISSN（中文期刊 CN-only），OpenAlex/Crossref 均不支持按 CN 解析 |
+| `manual_required` | 预留：人工通过其他渠道补充 |
+| `failed` | API 调用真 failure（http_error / timeout / parse_error / unexpected） |
+
+## 一致性约束（v1.2 增量）
+
+1. `journals.source_file` 必须非空（CSV 原文的"来源文件"字段）
+2. `papers.journal_id` 必须存在于 `journals.id`（FK）
+3. `paper_authors.paper_id` 必须存在于 `papers.id`（FK + ON DELETE CASCADE）
+4. `papers.doi` 唯一（如有）；缺失时由 sha1 兜底
+5. 同一 paper 的同一 position + 同一姓名只入一行（`paper_authors.id` 唯一）
+
+## 退出码语义（`papers.js` 主入口）
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 全部期刊都跑完（含 `success` / `no_results` / `api_unsupported` 都算 ok） |
+| `1` | 参数错误 / CSV 不存在 |
+| `2` | 至少一本期刊 `failed`（API 真 error） |
+| `3` | 过滤后没有任何期刊被选中 |
+
+`api_unsupported` 属于预期路径（CN-only 中文期刊），不计入 failure / 不影响退出码。

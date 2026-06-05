@@ -143,6 +143,102 @@ function fail(msg) {
     else console.log(`- ${name}: ${lines.length} rows valid`);
   }
 
+  // ---- BRA-9: 期刊 / 论文 / 论文作者 ----
+  const hasJournalsTable = db.prepare(`
+    SELECT name FROM sqlite_master WHERE type='table' AND name='journals'
+  `).get();
+  if (hasJournalsTable) {
+    const jCount = db.prepare('SELECT COUNT(*) AS n FROM journals').get().n;
+    console.log(`- BRA-9 journals table: ${jCount} rows`);
+    if (jCount === 0) {
+      console.log('  (run papers.js --all to seed the journals/papers/paper_authors tables)');
+    } else {
+      const jStats = db.prepare(`
+        SELECT query_status, COUNT(*) AS n
+        FROM journals
+        GROUP BY query_status
+        ORDER BY n DESC
+      `).all();
+      console.log(`  status: ${JSON.stringify(Object.fromEntries(jStats.map((r) => [r.query_status, r.n])))}`);
+      const apiUnsupported = db.prepare(`
+        SELECT COUNT(*) AS n FROM journals
+        WHERE query_status = 'api_unsupported'
+      `).get().n;
+      const noIssn = db.prepare(`
+        SELECT COUNT(*) AS n FROM journals
+        WHERE issn_print IS NULL OR issn_print = ''
+      `).get().n;
+      if (noIssn !== apiUnsupported) {
+        fail(`journals with no ISSN (${noIssn}) != api_unsupported (${apiUnsupported}); every CN-only journal should be marked api_unsupported`);
+      }
+      const hasP = db.prepare(`
+        SELECT name FROM sqlite_master WHERE type='table' AND name='papers'
+      `).get();
+      if (hasP) {
+        const pCount = db.prepare('SELECT COUNT(*) AS n FROM papers').get().n;
+        const pInRange = db.prepare(`
+          SELECT COUNT(*) AS n FROM papers
+          WHERE publish_year IS NOT NULL AND publish_year >= 2021 AND publish_year <= 2026
+        `).get().n;
+        console.log(`  papers: ${pCount} total, ${pInRange} in 2021-2026 range`);
+        const orphanPapers = db.prepare(`
+          SELECT COUNT(*) AS n FROM papers p
+          LEFT JOIN journals j ON j.id = p.journal_id
+          WHERE j.id IS NULL
+        `).get().n;
+        if (orphanPapers > 0) fail(`orphan papers (no matching journal): ${orphanPapers}`);
+
+        const hasPA = db.prepare(`
+          SELECT name FROM sqlite_master WHERE type='table' AND name='paper_authors'
+        `).get();
+        if (hasPA) {
+          const aCount = db.prepare('SELECT COUNT(*) AS n FROM paper_authors').get().n;
+          const chs = db.prepare(`
+            SELECT COUNT(*) AS n FROM paper_authors
+            WHERE chinese_name_probability >= 0.4
+          `).get().n;
+          const target = db.prepare(`
+            SELECT COUNT(*) AS n FROM paper_authors
+            WHERE is_target_candidate = 1
+          `).get().n;
+          console.log(`  paper_authors: ${aCount} total, ${chs} chinese_likely, ${target} target_candidates`);
+          const orphanAuthors = db.prepare(`
+            SELECT COUNT(*) AS n FROM paper_authors pa
+            LEFT JOIN papers p ON p.id = pa.paper_id
+            WHERE p.id IS NULL
+          `).get().n;
+          if (orphanAuthors > 0) fail(`orphan paper_authors (no matching paper): ${orphanAuthors}`);
+          if (target > 0) {
+            const chsCheck = db.prepare(`
+              SELECT COUNT(*) AS n FROM paper_authors
+              WHERE is_target_candidate = 1
+                AND (is_first_author = 1 OR is_last_author = 1 OR is_corresponding = 1)
+                AND chinese_name_probability >= 0.4
+            `).get().n;
+            if (chsCheck !== target) {
+              fail(`target_candidate consistency: ${target} flagged, ${chsCheck} match (first/last/corresponding AND chinese>=0.4)`);
+            }
+          }
+        }
+      }
+    }
+  } else {
+    console.log('- BRA-9 journals table: (not yet created; run papers.js --all to seed)');
+  }
+
+  // ---- BRA-9: 期刊/论文 JSONL 文件存在且可解析 ----
+  for (const name of ['journals.jsonl', 'papers.jsonl', 'paper_authors.jsonl']) {
+    const p = path.join(DATA_DIR, name);
+    if (!fs.existsSync(p)) continue;
+    const lines = fs.readFileSync(p, 'utf8').split('\n').filter(Boolean);
+    let bad = 0;
+    for (const line of lines) {
+      try { JSON.parse(line); } catch (_) { bad += 1; }
+    }
+    if (bad > 0) fail(`${name}: ${bad}/${lines.length} invalid JSONL rows`);
+    else console.log(`- ${name}: ${lines.length} rows valid`);
+  }
+
   if (process.exitCode === 1) console.error('\nVALIDATION FAILED');
   else console.log('\nVALIDATION OK');
   db.close();
