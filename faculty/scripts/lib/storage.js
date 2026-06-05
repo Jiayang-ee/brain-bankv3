@@ -42,6 +42,7 @@ CREATE INDEX IF NOT EXISTS idx_candidates_dept   ON candidates(department_id);
 CREATE INDEX IF NOT EXISTS idx_candidates_chs    ON candidates(chinese_name_probability);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_candidates_source ON candidates(source_kind, source_url);
 
+-- 注：headshot_* 列通过 ensureColumn() 幂等迁移添加，避免重复 ADD COLUMN 报错
 CREATE TABLE IF NOT EXISTS crawl_log (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   ts              TEXT    NOT NULL,
@@ -86,6 +87,13 @@ function nowIso() { return new Date().toISOString(); }
 
 function ensureDir(p) { fs.mkdirSync(p, { recursive: true }); }
 
+// 幂等 ALTER TABLE ADD COLUMN：列已存在则跳过
+function ensureColumn(db, table, column, decl) {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (rows.some((r) => r.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+}
+
 function createStore({ dataDir, sqlite, logger = console } = {}) {
   if (!dataDir) throw new Error('createStore: dataDir required');
   if (!sqlite) throw new Error('createStore: sqlite (node:sqlite) module required');
@@ -94,6 +102,16 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
   const { DatabaseSync } = sqlite;
   const db = new DatabaseSync(dbPath);
   db.exec(SCHEMA_SQL);
+  // 幂等迁移：BRA-8 给 candidates 加 headshot_* 列（SQLite ADD COLUMN 不可重复）
+  ensureColumn(db, 'candidates', 'headshot_url', 'TEXT');
+  ensureColumn(db, 'candidates', 'headshot_local_path', 'TEXT');
+  ensureColumn(db, 'candidates', 'headshot_content_type', 'TEXT');
+  ensureColumn(db, 'candidates', 'headshot_bytes', 'INTEGER');
+  ensureColumn(db, 'candidates', 'headshot_crawl_status', 'TEXT');
+  ensureColumn(db, 'candidates', 'headshot_fetched_at', 'TEXT');
+  ensureColumn(db, 'candidates', 'headshot_error_detail', 'TEXT');
+  ensureColumn(db, 'candidates', 'headshot_source_url', 'TEXT');
+  try { db.exec(`CREATE INDEX IF NOT EXISTS idx_candidates_headshot_status ON candidates(headshot_crawl_status)`); } catch (_) { /* ignore */ }
 
   const candidatesJsonlPath = path.join(dataDir, 'candidates.jsonl');
   const crawlLogJsonlPath = path.join(dataDir, 'crawl_log.jsonl');
@@ -166,6 +184,46 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
       SUM(CASE WHEN chinese_name_probability >= 0.4 THEN 1 ELSE 0 END) AS chinese
     FROM candidates
     WHERE school_rank = ? AND department_id = ?
+  `);
+  // BRA-8: 候选人照片字段更新
+  const updateHeadshot = db.prepare(`
+    UPDATE candidates SET
+      headshot_url = @headshot_url,
+      headshot_local_path = @headshot_local_path,
+      headshot_content_type = @headshot_content_type,
+      headshot_bytes = @headshot_bytes,
+      headshot_crawl_status = @headshot_crawl_status,
+      headshot_fetched_at = @headshot_fetched_at,
+      headshot_error_detail = @headshot_error_detail,
+      headshot_source_url = @headshot_source_url
+    WHERE id = @id
+  `);
+  const selectHeadshotCandidates = db.prepare(`
+    SELECT id, school_rank, school_name_en, department_id, source_url, local_path,
+           headshot_crawl_status
+    FROM candidates
+    WHERE source_kind = 'personal_page'
+      AND crawl_status = 'success'
+      AND local_path IS NOT NULL
+      AND (@only_pending = 0 OR headshot_crawl_status IS NULL OR headshot_crawl_status != 'success' OR @force = 1)
+      AND (@school_rank IS NULL OR school_rank = @school_rank)
+    ORDER BY school_rank ASC, department_id ASC, id ASC
+    LIMIT @limit
+  `);
+  const countByStatus = db.prepare(`
+    SELECT headshot_crawl_status AS status, COUNT(*) AS n
+    FROM candidates
+    WHERE source_kind = 'personal_page' AND headshot_crawl_status IS NOT NULL
+    GROUP BY headshot_crawl_status
+  `);
+  const headshotAggregate = db.prepare(`
+    SELECT
+      SUM(CASE WHEN headshot_crawl_status = 'success' THEN 1 ELSE 0 END) AS success,
+      SUM(CASE WHEN headshot_crawl_status = 'no_photo' THEN 1 ELSE 0 END) AS no_photo,
+      SUM(CASE WHEN headshot_crawl_status IS NULL THEN 1 ELSE 0 END) AS pending,
+      COUNT(*) AS total
+    FROM candidates
+    WHERE source_kind = 'personal_page'
   `);
 
   function setMetaPair(k, v) { setMeta.run(k, v); }
@@ -240,6 +298,41 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
     return { total: r.total || 0, chinese: r.chinese || 0 };
   }
 
+  // BRA-8: 写回照片抓取结果
+  function recordHeadshot(entry) {
+    updateHeadshot.run({
+      id: entry.id,
+      headshot_url: entry.headshotUrl ?? null,
+      headshot_local_path: entry.headshotLocalPath ?? null,
+      headshot_content_type: entry.headshotContentType ?? null,
+      headshot_bytes: entry.headshotBytes ?? null,
+      headshot_crawl_status: entry.headshotCrawlStatus,
+      headshot_fetched_at: entry.headshotFetchedAt || nowIso(),
+      headshot_error_detail: entry.headshotErrorDetail
+        ? String(entry.headshotErrorDetail).slice(0, 4096)
+        : null,
+      headshot_source_url: entry.headshotSourceUrl ?? null,
+    });
+  }
+
+  // BRA-8: 选出需要处理照片的候选人
+  function selectPhotoCandidates({ schoolRank = null, onlyPending = true, force = false, limit = 100000 } = {}) {
+    return selectHeadshotCandidates.all({
+      only_pending: onlyPending ? 1 : 0,
+      force: force ? 1 : 0,
+      school_rank: schoolRank,
+      limit,
+    });
+  }
+
+  // BRA-8: 统计 headshot_crawl_status 分布
+  function getHeadshotStats() {
+    const dist = {};
+    for (const r of countByStatus.all()) dist[r.status || 'pending'] = r.n;
+    const agg = headshotAggregate.get();
+    return { distribution: dist, totals: agg || { success: 0, no_photo: 0, pending: 0, total: 0 } };
+  }
+
   function close() {
     try { db.close(); } catch (_) { /* ignore */ }
   }
@@ -250,6 +343,9 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
     recordCrawlLog,
     recordCandidate,
     recordDepartmentSummary,
+    recordHeadshot,
+    selectPhotoCandidates,
+    getHeadshotStats,
     getDeptCounts,
     setMeta: setMetaPair,
     getMeta: getMetaPair,

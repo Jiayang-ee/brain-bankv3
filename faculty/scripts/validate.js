@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // validate.js — 校验 faculty/data/faculty.db + JSONL 文件的内部一致性。
-// 用法： node faculty/scripts/validate.js
+// 用法： node faculty/scripts/validate.js [--out <dir>]
 // 退出码：0=ok；1=失败
 
 'use strict';
@@ -9,7 +9,16 @@ const fs = require('node:fs');
 const path = require('node:path');
 const sqlite = require('node:sqlite');
 
-const DATA_DIR = path.resolve(__dirname, '..', 'data');
+function parseOutArg(argv) {
+  for (let i = 2; i < argv.length; i += 1) {
+    if (argv[i] === '--out') return argv[i + 1];
+  }
+  return null;
+}
+
+const DATA_DIR = parseOutArg(process.argv)
+  ? path.resolve(parseOutArg(process.argv))
+  : path.resolve(__dirname, '..', 'data');
 const DB_PATH = path.join(DATA_DIR, 'faculty.db');
 const REQUIRED_CATEGORIES = new Set([
   'business_school', 'management_school',
@@ -66,6 +75,42 @@ function fail(msg) {
   // ---- crawl_log 状态分布 ----
   const statusRows = db.prepare(`SELECT status, COUNT(*) AS n FROM crawl_log GROUP BY status ORDER BY n DESC`).all();
   console.log(`- crawl_log status distribution: ${JSON.stringify(Object.fromEntries(statusRows.map((r) => [r.status, r.n])))}`);
+
+  // ---- headshot 抓取状态分布（BRA-8） ----
+  const headshotRows = db.prepare(`
+    SELECT headshot_crawl_status AS status, COUNT(*) AS n
+    FROM candidates
+    WHERE source_kind = 'personal_page' AND headshot_crawl_status IS NOT NULL
+    GROUP BY headshot_crawl_status
+    ORDER BY n DESC
+  `).all();
+  if (headshotRows.length > 0) {
+    console.log(`- headshot status distribution: ${JSON.stringify(Object.fromEntries(headshotRows.map((r) => [r.status, r.n])))}`);
+  } else {
+    console.log(`- headshot status distribution: (no personal_page candidates have been processed; run photos.js)`);
+  }
+
+  // ---- headshot 一致性抽样校验（BRA-8） ----
+  const headshotOk = db.prepare(`
+    SELECT headshot_local_path
+    FROM candidates
+    WHERE source_kind = 'personal_page' AND headshot_crawl_status = 'success' AND headshot_local_path IS NOT NULL
+    LIMIT 20
+  `).all();
+  let headshotMissing = 0;
+  for (const r of headshotOk) {
+    if (!r.headshot_local_path) continue;
+    const p = path.join(DATA_DIR, r.headshot_local_path);
+    if (!fs.existsSync(p)) {
+      headshotMissing += 1;
+      if (headshotMissing <= 3) console.error(`   headshot file missing: ${r.headshot_local_path}`);
+    }
+  }
+  if (headshotMissing > 0) {
+    fail(`headshot files missing: ${headshotMissing}/${headshotOk.length}`);
+  } else if (headshotOk.length > 0) {
+    console.log(`- headshot files present: ${headshotOk.length}/${headshotOk.length}`);
+  }
 
   // ---- 总体统计 ----
   const totals = db.prepare(`

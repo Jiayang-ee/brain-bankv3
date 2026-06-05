@@ -161,14 +161,19 @@ function dryRunPersonalSample({ entry, profileUrl, idx }) {
     { name: 'Meng Zhao', title: 'PhD Student in Management Science', cjk: '赵萌' },
   ];
   const pick = names[idx % names.length];
+  // BRA-8: 在样例 HTML 里插入 <meta og:image> + <img class=headshot>，让 photos.js dry-run
+  // 走完整抽取→下载→落盘链路（fake fetch 会拦截 *.jpg 返回 1x1 PNG）
+  const photoUrl = `${entry.url.replace(/\/$/, '')}/photos/${pick.name.toLowerCase().replace(/\s+/g, '-')}.jpg`;
   const html = `<!doctype html>
 <html><head>
   <title>${pick.name} | ${entry.department_name_en}</title>
   <meta name="author" content="${pick.name}">
   <meta name="description" content="${pick.title}">
+  <meta property="og:image" content="${photoUrl}">
 </head>
 <body>
   <h1>${pick.name}</h1>
+  <img class="headshot profile-photo" src="${photoUrl}" alt="${pick.name} headshot" width="200" height="200">
   <p class="title">${pick.title}</p>
   <p>Email: <a href="mailto:${pick.name.toLowerCase().replace(/\s+/g, '.')}@example.edu">${pick.name.toLowerCase().replace(/\s+/g, '.')}@example.edu</a></p>
   <p>${pick.cjk || ''}</p>

@@ -1,12 +1,13 @@
 # Faculty Crawler (`faculty/`)
 
 > 维护方：后端开发工程师 (multica-agent: `a96a336b`)
-> 适用任务：BRA-7 学校官网教师页入口发现与本地归档爬虫
+> 适用任务：BRA-7 学校官网教师页入口发现与本地归档爬虫 / BRA-8 教师照片下载与抓取状态日志
 > 关联输入：`qs50/data/qs50_schools.json` (v1.0) + `qs50/data/qs50_departments.json` (v2.1)
-> 关联下游：BRA-8（教师照片）、BRA-9（期刊作者）、BRA-10（人工审核查看器）
+> 关联下游：BRA-9（期刊作者）、BRA-10（人工审核查看器）
 
 基于 `qs50/data` 院系入口库，发现并归档 QS50 相关院系的教师列表页与个人主页 HTML，
-对候选教师姓名执行高召回疑似华人初筛，并把结构化结果落到 SQLite + JSONL 便于 BRA-8/9/10 复用。
+对候选教师姓名执行高召回疑似华人初筛，并把结构化结果落到 SQLite + JSONL 便于 BRA-9/10 复用；
+进一步从个人主页抽取头像 URL、下载本地、保存为人工复核证据（不参与华人身份判断）。
 
 零第三方依赖（仅 Node.js ≥ 22.5 内置模块：`node:sqlite` / `node:https` / `node:fs` / `node:path` / `node:crypto` / `node:zlib` / `node:assert`）。
 
@@ -41,17 +42,74 @@ node faculty/scripts/discover.js --all --dry-run --verbose
 - `crawl_log.jsonl` — 抓取明细（成功 / 失败 / 状态码 / 耗时 / 错误）
 - `html/<school>/<dept>/{list,people/<sha>}/...` — 归档的 HTML
 
+## 教师照片下载（BRA-8）
+
+依赖 BRA-7 已落地的 `faculty.db` 与本地 HTML。读取 `candidates` 表中
+`source_kind='personal_page' AND crawl_status='success'` 的候选人，
+从对应 HTML 抽取照片 URL、下载到本地、记录抓取状态。
+
+```bash
+# 离线 dry-run：用 fake fetch + 1x1 PNG，验证抽取/落盘/状态写入链路
+node faculty/scripts/photos.js --all --dry-run
+
+# 默认行为：跳过已 success 的，仅处理 pending / failed
+node faculty/scripts/photos.js --all
+
+# --force 重新处理已 success 的（用于更新原图）
+node faculty/scripts/photos.js --all --force
+
+# 只处理指定学校
+node faculty/scripts/photos.js --schools 1,2,20
+
+# 上限 + 自定义输出
+node faculty/scripts/photos.js --all --max-profiles 100 --out /tmp/fo
+```
+
+跑完会在 `faculty/data/`（或 `--out` 指定目录）追加/更新：
+- `candidates.headshot_*` — 8 个新列（见 schema v1.1）
+- `html/<school>/<dept>/people/<sha>/photo/<hash>.<ext>` — 归档的照片
+- `crawl_log` 追加 `target_kind='headshot'` 行（沿用同表，用 `target_kind` 区分页面/图片事件）
+
+### 照片状态枚举
+
+详见 `schema/faculty_schema.md` v1.1 节。简表：
+
+| 状态 | 含义 |
+| --- | --- |
+| `success` | 200 + image/* + bytes > 100，已落盘 |
+| `no_photo` | HTML 中无可抽取照片 URL |
+| `http_error` | 4xx/5xx（不含 401/403/451） |
+| `anti_leech_suspected` | 401/403/451 / 空 body / < 100B（疑似防盗链/校验页） |
+| `format_unsupported` | content-type 非 image/* |
+| `timeout` / `dns_error` / `connection_refused` / `too_large` | 网络层错误 |
+| `manual_required` | 跨 host 重定向等需人工处理 |
+| `skipped` | 本地 HTML 缺失（仅非 dry-run 模式） |
+| `error` | 其他 |
+
+> 备注：照片 `skipped` / `failed` / `no_photo` 不阻断候选人入库。`headshot_crawl_status` 是独立维度，不影响 `candidates.crawl_status`。
+> 照片只作为人工复核证据，**不**用于自动判断华人身份。
+
+### 退出码
+
+| 退出码 | 含义 |
+| --- | --- |
+| `0` | 全部 `processed` 完成；无真 failure（含 `no_photo` / `skipped`） |
+| `1` | 参数错误 / `faculty.db` 不存在 |
+| `2` | 至少一个 headshot 出现真 failure（`http_error` / `format_unsupported` / `anti_leech` / `timeout` / ...） |
+| `3` | 没有匹配到任何 personal_page 候选人 |
+
 ## 校验
 
 ```bash
-node faculty/scripts/tests/run.js   # 84 个单元测试
+node faculty/scripts/tests/run.js   # 136 个单元测试
 node faculty/scripts/validate.js     # 校验跑批产出的数据
 ```
 
 期望输出末尾：
-- `84 tests, 0 failed`
+- `136 tests, 0 failed`
 - `VALIDATION OK`
 - `school coverage: 50/50 (OK)`
+- `headshot status distribution: {"success":...,"no_photo":...,...}`
 
 ## CLI 选项
 
