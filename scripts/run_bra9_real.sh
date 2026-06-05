@@ -5,18 +5,21 @@
 #   scripts/run_bra9_real.sh                              # default: out=<repo>/faculty/data/real-YYYY-MM-DD, log=<repo>/logs
 #   OUT_DIR=path/to/out LOG_DIR=path/to/log scripts/run_bra9_real.sh
 #
-# Repo root is auto-detected by walking up from $0 until a .git directory is
-# found, so the script works from any checkout (CI, local dev, other worktrees).
+# Repo root is auto-detected by walking up from $0 until a .git directory or
+# worktree pointer file is found, so the script works from any checkout
+# (CI, local dev, git worktree, plain clone).
 set -u
 
 # --- locate repo root -------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$SCRIPT_DIR"
-while [ "$REPO_ROOT" != "/" ] && [ ! -d "$REPO_ROOT/.git" ]; do
+# Accept .git as either a directory (main clone) or a worktree pointer file
+# (worktree clones have a 168-byte text file `gitdir: ...` instead).
+while [ "$REPO_ROOT" != "/" ] && [ ! -e "$REPO_ROOT/.git" ]; do
   REPO_ROOT="$(dirname "$REPO_ROOT")"
 done
-if [ ! -d "$REPO_ROOT/.git" ]; then
-  echo "fatal: could not find a .git directory above $SCRIPT_DIR" >&2
+if [ ! -e "$REPO_ROOT/.git" ]; then
+  echo "fatal: could not find a .git (dir or file) above $SCRIPT_DIR" >&2
   exit 1
 fi
 echo "repo: $REPO_ROOT"
