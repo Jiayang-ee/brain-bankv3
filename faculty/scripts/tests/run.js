@@ -19,6 +19,9 @@ const testFiles = [
   './discover-flow.test.js',
   './photos.test.js',
   './photos-flow.test.js',
+  './papers_csv.test.js',
+  './paper_extract.test.js',
+  './papers_flow.test.js',
 ];
 
 let totalRun = 0;
