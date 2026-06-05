@@ -1,10 +1,10 @@
-# Faculty Crawler Schema (v1.0)
+# Faculty Crawler Schema (v1.1)
 
 > 维护方：后端开发工程师 (multica-agent: `a96a336b`)
-> 适用任务：BRA-7 学校官网教师页入口发现与本地归档爬虫
-> 数据版本：v1.0
+> 适用任务：BRA-7 学校官网教师页入口发现与本地归档爬虫 / BRA-8 教师照片下载与抓取状态日志
+> 数据版本：v1.1
 > 关联输入：`qs50/data/qs50_schools.json` (v1.0) + `qs50/data/qs50_departments.json` (v2.1)
-> 关联下游：BRA-8（教师照片）、BRA-9（期刊作者）、BRA-10（人工审核查看器）
+> 关联下游：BRA-9（期刊作者）、BRA-10（人工审核查看器）
 
 本目录是 `BRA-7` 任务的交付物。爬虫以 `qs50/data` 为入口库，发现并归档 QS50
 相关院系的教师列表页与个人主页 HTML，并对候选教师姓名执行高召回疑似华人初筛。
@@ -43,6 +43,7 @@ faculty/
 │   └── html/                    # 归档的 HTML 文件
 │       └── <school-slug>/<dept-id>/list/<idx>.html
 │       └── <school-slug>/<dept-id>/people/<slug>/index.html
+│       └── <school-slug>/<dept-id>/people/<slug>/photo/<hash>.<ext>  # BRA-8 照片
 └── .gitignore
 ```
 
@@ -77,7 +78,17 @@ CREATE TABLE IF NOT EXISTS candidates (
   review_notes                TEXT,
   first_seen_at               TEXT    NOT NULL,          -- ISO8601 UTC
   last_seen_at                TEXT    NOT NULL,
-  crawl_status                TEXT    NOT NULL           -- 参见抓取状态枚举
+  crawl_status                TEXT    NOT NULL,          -- 参见抓取状态枚举
+
+  -- BRA-8 照片下载（迁移添加，nullable）
+  headshot_url                TEXT,                       -- 抽到的图片 URL
+  headshot_local_path         TEXT,                       -- 归档的本地图片路径（相对 faculty/data/）
+  headshot_content_type       TEXT,                       -- 实际响应的 MIME
+  headshot_bytes              INTEGER,                    -- 图片字节数
+  headshot_crawl_status       TEXT,                       -- 照片抓取状态枚举
+  headshot_fetched_at         TEXT,                       -- ISO8601 UTC
+  headshot_error_detail       TEXT,                       -- 失败原因
+  headshot_source_url         TEXT                        -- 来自哪个 personal page（冗余便于追溯）
 );
 
 CREATE INDEX IF NOT EXISTS idx_candidates_school ON candidates(school_rank);
@@ -140,6 +151,25 @@ CREATE TABLE IF NOT EXISTS department_summary (
 | `skipped` | 主动跳过（dry-run、人工黑名单等） |
 | `error` | 其他未分类错误 |
 
+### 照片抓取状态枚举（`candidates.headshot_crawl_status`，BRA-8 引入）
+
+| 值 | 含义 |
+| --- | --- |
+| `success` | 图片下载并落盘，content-type 为 image/*，字节数 > 100 |
+| `no_photo` | HTML 中无可抽取的照片 URL（无 og:image/twitter:image/<img>） |
+| `http_error` | HTTP 4xx/5xx（不含 401/403/451） |
+| `timeout` | 下载超时 |
+| `dns_error` | DNS 解析失败 |
+| `connection_refused` | TCP 连接被拒 |
+| `too_large` | 响应 > 8 MiB 限制 |
+| `format_unsupported` | content-type 非 image/*（如 text/html 重定向/错误页） |
+| `anti_leech_suspected` | 401/403/451 或空 body / < 100 字节（疑似防盗链/校验页） |
+| `manual_required` | 跨 host 重定向等需要人工处理 |
+| `skipped` | 本地 HTML 缺失，无法判断（仅在非 dry-run 模式下使用） |
+| `error` | 其他未分类错误 |
+
+> 备注：照片 `skipped` 不计入候选人是否入库；任何 `headshot_crawl_status` 都只写到候选人行，不影响 `candidates.crawl_status`。
+
 ### 候选人 `review_status` 枚举
 
 `pending` (默认) / `confirmed` / `excluded` / `focus`，由人工/上游系统后续回写（详见 BRA-10）。
@@ -198,10 +228,18 @@ CREATE TABLE IF NOT EXISTS department_summary (
 
 `skipped`（excluded 入口审计行 + `requires_js` 跳过）属于预期路径，不计入 `failures`、不影响退出码，输出 JSON 中单独以 `skipped` 字段暴露，便于 CI 区分。
 
-## 后续可扩展字段（不在 v1.0 范围）
+## 后续可扩展字段（不在 v1.1 范围）
 
-- `candidates.headshot_url` / `headshot_local_path` — 由 BRA-8 写入
 - `candidates.evidence_papers` — 论文证据，由 BRA-9 写入
 - `candidates.relatedness_score` — 人工标注的相关性分数
 
 新增字段必须先更新本 `faculty_schema.md` 的版本号再写入。
+
+## v1.1 变更（BRA-8）
+
+- `candidates` 表新增 8 个 nullable 列：`headshot_url` / `headshot_local_path` / `headshot_content_type` / `headshot_bytes` / `headshot_crawl_status` / `headshot_fetched_at` / `headshot_error_detail` / `headshot_source_url`
+- 新增 photo 状态枚举（见上）
+- 新增脚本 `faculty/scripts/photos.js` 与模块 `faculty/scripts/lib/photos.js`
+- 新增测试 `photos.test.js` / `photos-flow.test.js`（+50 个测试用例）
+- `crawl_log` 表的 `target_kind` 现支持 `headshot`（沿用同一表，区分 photo 事件）
+- 抓取日志可区分页面失败和图片失败（同一行 `status` 字段携带不同 `target_kind`）

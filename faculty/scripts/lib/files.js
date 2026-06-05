@@ -60,4 +60,4 @@ function relToPosix(p) {
   return p.split(path.sep).join('/');
 }
 
-module.exports = { slugify, schoolSlug, urlHash, htmlRelPath, writeArchive, relToPosix };
+module.exports = { slugify, schoolSlug, urlHash, htmlRelPath, writeArchive, ensureDir, relToPosix };

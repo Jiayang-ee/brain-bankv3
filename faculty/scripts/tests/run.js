@@ -17,6 +17,8 @@ const testFiles = [
   './loader.test.js',
   './storage.test.js',
   './discover-flow.test.js',
+  './photos.test.js',
+  './photos-flow.test.js',
 ];
 
 let totalRun = 0;
