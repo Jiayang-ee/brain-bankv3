@@ -1,33 +1,67 @@
 #!/usr/bin/env bash
-# BRA-9 full real network run launcher
+# BRA-9 full real network run launcher.
+#
+# Usage:
+#   scripts/run_bra9_real.sh                              # default: out=<repo>/faculty/data/real-YYYY-MM-DD, log=<repo>/logs
+#   OUT_DIR=path/to/out LOG_DIR=path/to/log scripts/run_bra9_real.sh
+#
+# Repo root is auto-detected by walking up from $0 until a .git directory is
+# found, so the script works from any checkout (CI, local dev, other worktrees).
 set -u
-cd /Users/wjy/multica_workspaces_desktop-api.multica.ai/07cb4f37-083d-4f52-9010-e6031f5c1972/6b086fde/workdir/brain-bankv3
-mkdir -p logs faculty/data/real-2026-06-05
-LOG_DIR=/Users/wjy/multica_workspaces_desktop-api.multica.ai/07cb4f37-083d-4f52-9010-e6031f5c1972/6b086fde/workdir/logs
-mkdir -p "$LOG_DIR"
+
+# --- locate repo root -------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$SCRIPT_DIR"
+while [ "$REPO_ROOT" != "/" ] && [ ! -d "$REPO_ROOT/.git" ]; do
+  REPO_ROOT="$(dirname "$REPO_ROOT")"
+done
+if [ ! -d "$REPO_ROOT/.git" ]; then
+  echo "fatal: could not find a .git directory above $SCRIPT_DIR" >&2
+  exit 1
+fi
+echo "repo: $REPO_ROOT"
+
+# --- resolve out / log dirs -------------------------------------------------
+DATE_TAG="$(date +%Y-%m-%d)"
+DEFAULT_OUT="$REPO_ROOT/faculty/data/real-$DATE_TAG"
+DEFAULT_LOG="$REPO_ROOT/logs"
+OUT_DIR="${OUT_DIR:-$DEFAULT_OUT}"
+LOG_DIR="${LOG_DIR:-$DEFAULT_LOG}"
+
+# Optional narrow-scope filter.  Empty = all 51 journals (default).
+SYSTEMS_FLAG=""
+if [ -n "${SYSTEMS_FILTER:-}" ]; then
+  SYSTEMS_FLAG="--systems $SYSTEMS_FILTER"
+fi
+
+mkdir -p "$OUT_DIR" "$LOG_DIR"
 STDOUT="$LOG_DIR/bra9-real-run.stdout.log"
 STDERR="$LOG_DIR/bra9-real-run.stderr.log"
 PIDFILE="$LOG_DIR/bra9-real-run.pid"
 
-# Don't restart if already running
+# --- don't double-launch ----------------------------------------------------
 if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
   echo "already running pid=$(cat "$PIDFILE")"
   exit 0
 fi
 
+# --- launch detached --------------------------------------------------------
 # macOS lacks setsid.  Detach via subshell + nohup + disown: the subshell exits
 # quickly so the bash tool wrapper doesn't hold the child in its session, and
 # nohup + disown ensure the child ignores SIGHUP and is removed from the job
 # table.
 (
-  cd /Users/wjy/multica_workspaces_desktop-api.multica.ai/07cb4f37-083d-4f52-9010-e6031f5c1972/6b086fde/workdir/brain-bankv3
+  cd "$REPO_ROOT"
   nohup node faculty/scripts/papers.js --all \
-    --out faculty/data/real-2026-06-05 \
+    --out "$OUT_DIR" \
     --verbose \
+    $SYSTEMS_FLAG \
     > "$STDOUT" 2> "$STDERR" < /dev/null &
   echo $! > "$PIDFILE"
   disown
 )
 echo "launched pid=$(cat "$PIDFILE")"
+echo "out:   $OUT_DIR"
+echo "log:   $LOG_DIR"
 echo "stdout: $STDOUT"
 echo "stderr: $STDERR"
