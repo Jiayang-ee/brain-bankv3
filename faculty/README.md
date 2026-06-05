@@ -248,10 +248,30 @@ Cache-Control:     no-cache
 
 **实战经验**：
 - **Stanford 子站（`gsb.stanford.edu` / `mccombs.utexas.edu`）的 403** 不需要重试——直接接受 `no_faculty_page`，把这类部门加 `qs50_departments.json` 的 `notes` 注明"403 WAF"以便人工评估是否走 headless。
-- **MIT IDSS WordPress 站**的 200 + 404 模板（`<title>Not Found – IDSS</title>`）当前由 v2.2 起的 `parseNameFromTitle` 兜底，把 name 退到 `nameFromUrlSlug`；不会污染 `name_raw` 字段——[BRA-13](mention://issue/e0e1c548-ba3b-46eb-9b8e-2ebfe02ec701) 最终 3892 row 中确认 0 条 `name_raw='Not Found'` 污染。
+- **MIT IDSS WordPress 站**的 200 + 404 模板（`<title>Not Found – IDSS</title>`）当前由 v2.2 起的 `parseNameFromTitle` 兜底，把 name 退到 `nameFromUrlSlug`；能识别"WP Not Found 模板"的真 404 个案（v2.2 单测覆盖 `mit-idss-cm/victor-chernozhukov` 这类带 slug 的真个人页）。**但仍有 107 条 `name_raw='Not Found'` 实际污染**（v2.3.1 runbook 修正：PR #5 v2.3 写"0 污染"是错的），全部来自 `mit-idss-cm` 一个部门、`source_url` 形如 `https://idss.mit.edu/people/` / `/people/faculty/` / `/people/faculty/core-faculty/` 这种**列表页 URL 被 classify 当成 personal_page 抓取**，fetch 200 但内容是 WP 列表壳，slug 为空导致 name 兜底落 "Not Found"。**应对**：归类为 list-page→personal-page 误分类，作为 [BRA-15](mention://issue/8b8aa27e-e1c4-492f-83e8-0e8ac9cb381e) v2.4 followup：加强 `isProfileUrl()` 让"URL 末段是空 slug 或落在已知 list-page 后缀"时跳过；下游 [BRA-10](mention://issue/ea32de13-ac65-47c5-bc20-7013e621ddc9) 人工 review 时把这 107 条批量 `review_status='excluded'`。
 - **清华域 DNS 慢/超时**（v2.3 runbook 新增）：`tsinghua.edu.cn` / `tsinghua-dmei` 的 DNS 解析在跨太平洋链路上 P95 > 8s，单部门贡献了 timeout 57 条中的 30+ 条。**应对**：把清华相关 entry 加 `qs50_departments.json` 的 `notes: 'dns_slow; expect timeout; skip on --all'`；下游 BRA-10 人工 review 时直接走 headless。
 - **双斜杠 URL 污染**（v2.3 runbook 新增）：少数 entry.url 末段带 `//`（数据录入 bug，非 fetch 引起），导致拼接的 `entry.url + '/people'` 变成 `https://x//people`，触发 404/308 异常。**应对**：BRA-15 (v2.4) followup 会在 loader 层 strip 末尾 `/`；runbook 本期不修代码。
 - **connection_refused 78 条**（v2.3 runbook 新增）：多为目标站临时维护或 IP 黑名单，单 host 不重复出现。**应对**：重跑可能恢复；不需要改 host-level 限速。
+
+### 5b. 部门汇总 (`department_summary.last_run_status`) 真实分布
+
+[BRA-13](mention://issue/e0e1c548-ba3b-46eb-9b8e-2ebfe02ec701) `--all` 跑完 105 个 department 的最终 `last_run_status` 分布（PR #6 落地快照 `faculty.db`）：
+
+| `last_run_status` | 部门数 | 占比 | 含义 |
+| --- | --- | --- | --- |
+| `ok` | **45** | 42.9% | 部门有 list 页 + 至少 1 个 profile 落库；本次跑通 |
+| `no_faculty_page` | **31** | 29.5% | list 候选 URL 全 404/403/410 等，**计 1 次 failure**（exit code 2） |
+| `no_profiles` | **27** | 25.7% | 找到了 list 页但 list 内无可识别的 profile 链接（SSR 抓的列表页不含 `<a href="/people/xxx">` 这种 deep link；多是 JS 渲染的卡片网格） |
+| `skipped` | **2** | 1.9% | 预期跳过：Caltech `suspected_irrelevant`；不算 failure |
+| `requires_js` | 0 | 0% | 当前 qs50 v2.2 数据无 `needs_js_hint=true` 的 entry |
+
+`no_profiles` 的进一步处理：
+
+- 多数 `no_profiles` 部门是 SSR-only 抓不到（卡片网格 + JS 渲染的"查看更多"按钮），需要 headless 采集
+- 当前 headless 路径（puppeteer）还没做；**不阻塞本 runbook 文档校准**
+- 单 host 出现 > 2 个 `no_profiles` 部门时建议人工核查该 list 页是否真的"无 profile 链接"还是"profile 链接是 JS 注入"
+- 完整 `department_summary` 真实数据从 `faculty.db` `SELECT last_run_status, COUNT(*) FROM department_summary GROUP BY last_run_status` 实时取
+- 部分 `no_faculty_page` 与上面 "404 stale 404 ~100 条" 高度重叠：v2.4 followup 校准 hint URL 后可能转化一部分到 `ok`
 - **Cloudflare 5 秒盾 / JS challenge** 当前 SSR-only fetcher 无法绕过；如果单部门反复返回 200 + challenge HTML（`cf-chl-bypass` / `__cf_chl_jschl_tk__`），后续要单开 headless issue。
 
 ### 6. 增量跑：跳过已有本地 HTML
