@@ -9,13 +9,14 @@
 // 设计要点（PR #10 review 沉淀的边界）：
 //   1. 邮箱用 RFC5322 简化正则 + 黑名单域 + 长度上限 + local/domain 形状校验
 //   2. 同一作者多邮箱时按 "Corresponding author" 标记优先排序
-//   3. email_source 枚举：openalex_regex / publisher_wiley / publisher_elsevier / manual
-//      BRA-9.1 MVP 只产出 openalex_regex；publisher_* 留给 BRA-9.2 path B
+//   3. email_source 枚举：openalex_regex / publisher_wiley / publisher_elsevier / orcid_public_api / manual
+//      BRA-9.1 MVP 产 openalex_regex；BRA-9.2 spike 产 orcid_public_api（ORCID 公共 API 反向查询）；
+//      publisher_* 留给后续 spike
 //   4. 拒绝 ISSN-like 邮箱（"1234-5678@..."）、URL-like 邮箱（"http://x"）、纯数字 local part
 //   5. email_match_context 截断到 500 字符，避免 context 字段过大
 //
 // 公开：
-//   - EMAIL_SOURCE_OPENALEX_REGEX / EMAIL_SOURCE_PUBLISHER_WILEY / ..._ELSEVIER / _MANUAL
+//   - EMAIL_SOURCE_OPENALEX_REGEX / EMAIL_SOURCE_PUBLISHER_WILEY / ..._ELSEVIER / ..._ORCID_PUBLIC_API / _MANUAL
 //   - VALID_SOURCES
 //   - REJECTED_DOMAINS
 //   - EMAIL_RE
@@ -28,11 +29,13 @@
 const EMAIL_SOURCE_OPENALEX_REGEX = 'openalex_regex';
 const EMAIL_SOURCE_PUBLISHER_WILEY = 'publisher_wiley';
 const EMAIL_SOURCE_PUBLISHER_ELSEVIER = 'publisher_elsevier';
+const EMAIL_SOURCE_ORCID_PUBLIC_API = 'orcid_public_api';
 const EMAIL_SOURCE_MANUAL = 'manual';
 const VALID_SOURCES = [
   EMAIL_SOURCE_OPENALEX_REGEX,
   EMAIL_SOURCE_PUBLISHER_WILEY,
   EMAIL_SOURCE_PUBLISHER_ELSEVIER,
+  EMAIL_SOURCE_ORCID_PUBLIC_API,
   EMAIL_SOURCE_MANUAL,
 ];
 
@@ -139,6 +142,7 @@ module.exports = {
   EMAIL_SOURCE_OPENALEX_REGEX,
   EMAIL_SOURCE_PUBLISHER_WILEY,
   EMAIL_SOURCE_PUBLISHER_ELSEVIER,
+  EMAIL_SOURCE_ORCID_PUBLIC_API,
   EMAIL_SOURCE_MANUAL,
   VALID_SOURCES,
   REJECTED_DOMAINS: [...REJECTED_DOMAINS],

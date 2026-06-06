@@ -1,4 +1,4 @@
-// tests/email_extract.test.js — 单元测试：邮箱提取（BRA-9.1 path A）
+// tests/email_extract.test.js — 单元测试：邮箱提取（BRA-9.1 path A + BRA-9.2 新增 enum）
 
 'use strict';
 
@@ -8,6 +8,7 @@ const {
   EMAIL_SOURCE_OPENALEX_REGEX,
   EMAIL_SOURCE_PUBLISHER_WILEY,
   EMAIL_SOURCE_PUBLISHER_ELSEVIER,
+  EMAIL_SOURCE_ORCID_PUBLIC_API,
   EMAIL_SOURCE_MANUAL,
   VALID_SOURCES,
   REJECTED_DOMAINS,
@@ -58,13 +59,19 @@ test('isValidEmail: 黑名单域 → false', () => {
   }
 });
 
-test('VALID_SOURCES: 4 个枚举值且不重复', () => {
-  assert.equal(VALID_SOURCES.length, 4);
+test('VALID_SOURCES: 5 个枚举值且不重复（含 BRA-9.2 新增的 orcid_public_api）', () => {
+  assert.equal(VALID_SOURCES.length, 5);
   assert.ok(VALID_SOURCES.includes(EMAIL_SOURCE_OPENALEX_REGEX));
   assert.ok(VALID_SOURCES.includes(EMAIL_SOURCE_PUBLISHER_WILEY));
   assert.ok(VALID_SOURCES.includes(EMAIL_SOURCE_PUBLISHER_ELSEVIER));
+  assert.ok(VALID_SOURCES.includes(EMAIL_SOURCE_ORCID_PUBLIC_API));
   assert.ok(VALID_SOURCES.includes(EMAIL_SOURCE_MANUAL));
-  assert.equal(new Set(VALID_SOURCES).size, 4);
+  assert.equal(new Set(VALID_SOURCES).size, 5);
+});
+
+test('EMAIL_SOURCE_ORCID_PUBLIC_API: 字面值 = "orcid_public_api"', () => {
+  assert.equal(EMAIL_SOURCE_ORCID_PUBLIC_API, 'orcid_public_api');
+  assert.ok(VALID_SOURCES.includes('orcid_public_api'));
 });
 
 test('extractEmailFromAffiliation: 典型 Corresponding author 命中', () => {

@@ -23,6 +23,7 @@ const testFiles = [
   './paper_extract.test.js',
   './papers_flow.test.js',
   './email_extract.test.js',
+  './orcid_enrich.test.js',
 ];
 
 let totalRun = 0;
