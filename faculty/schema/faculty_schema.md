@@ -1,8 +1,8 @@
-# Faculty Crawler Schema (v1.4)
+# Faculty Crawler Schema (v1.5)
 
 > 维护方：后端开发工程师 (multica-agent: `a96a336b`)
-> 适用任务：BRA-7 学校官网教师页入口发现与本地归档爬虫 / BRA-8 教师照片下载与抓取状态日志 / BRA-9 期刊论文 API 查询与华人姓名高召回初筛 / BRA-9.1 作者邮箱 enrich / BRA-9.2 ORCID 公共 API 反向查询 enrich
-> 数据版本：v1.4
+> 适用任务：BRA-7 学校官网教师页入口发现与本地归档爬虫 / BRA-8 教师照片下载与抓取状态日志 / BRA-9 期刊论文 API 查询与华人姓名高召回初筛 / BRA-9.1 作者邮箱 enrich / BRA-9.2 ORCID 公共 API 反向查询 enrich / BRA-9.3 email 路径 pivot + ORCID KPI 切换
+> 数据版本：v1.5
 > 关联输入：`qs50/data/qs50_schools.json` (v1.0) + `qs50/data/qs50_departments.json` (v2.1) + `faculty/data/journals.csv`（BRA-9 附件）
 > 关联下游：BRA-10（人工审核查看器）
 
@@ -446,3 +446,63 @@ CREATE INDEX IF NOT EXISTS idx_pa_email_source ON paper_authors(email_source);
 - `email_extract.test.js` enum 校验更新（4 → 5）
 - `paper_authors.jsonl` 流水增加 7 个 ORCID 字段（向后兼容：未跑 spike 的作者都是 null）
 - `storage.js` 的 `createStore()` 用 `ensureColumn()` 幂等迁移；新跑 + 老 DB 共存
+
+### ORCID 路径 KPI 切换（BRA-9.2 spike 结论，BRA-9.3 正式落地）
+
+> 维护方：后端开发工程师 (multica-agent: `a96a336b`)
+> 切换日期：2026-06-07
+> 切换依据：[BRA-9.3 (BRA-18)](mention://issue/43cebb17-9e6a-4a30-92d6-8e252733f09c) / 100 样本 spike 跑完（PR #12 smoke log）
+
+BRA-9.2 ORCID 公共 API 100 样本烟测跑完后确认：ORCID 公共 API（匿名 `/read-public` scope）**结构上不返回 email**（需 `/email/read-private` scope，匿名访问拿不到）。因此 ORCID 路径重新定位为 **profile + affiliations enrich**，email 通道让位给其他方向（BRA-9.3 spike 候选）。
+
+| 维度 | 切换前 (BRA-9.2 spike 期) | 切换后 (BRA-9.3 起) |
+| --- | --- | --- |
+| **核心 KPI** | email 命中率（`count(email_source='orcid_public_api' AND email_raw IS NOT NULL) / count(*)`） | **profile 覆盖率**（`count(orcid_affiliations_json IS NOT NULL) / count(orcid_last_fetched IS NOT NULL)`） |
+| 字段保留 | 7 列 ORCID profile | 7 列 ORCID profile（**保留不动**：affiliations / credit_name / external_ids / last_modified / profile_json） |
+| 代码保留 | `lib/orcid_enrich.js` + `scripts/orcid_enrich.js` CLI + 24 单测 | 同上（PR #12 已合入） |
+| 价值定位 | email 补全通道 | **同名消歧 + 跳槽识别**（affiliations 历史的非 path B 唯一稳定来源） |
+| 验收门槛 | 命中率 ≥ 1% | profile 覆盖率 ≥ 50%（用 100 个已知跳槽作者 sample 验证，准确率达标即可进 spike → 一期放量） |
+
+### `email_source` 枚举（BRA-9.3 标注：`orcid_public_api` 仅作为 cold 备份）
+
+| 值 | 含义 | 路径等级 |
+| --- | --- | --- |
+| `openalex_regex` | path A 主路径（BRA-9.1）：OpenAlex `raw_affiliation_string` 正则命中 | 首选 |
+| `publisher_wiley` | path B 候选：Wiley 论文详情页抽取 | 备选 spike |
+| `publisher_elsevier` | path B 候选：Elsevier 论文详情页抽取 | 备选 spike |
+| `crossref_work_meta` | path C 候选（BRA-9.3 spike）：Crossref `/works/{doi}` 节点命中 assertion / license 邮箱 | 备选 spike |
+| `openaire_meta` | path D 候选（BRA-9.3 spike）：OpenAIRE `/researchProducts` 节点命中 OAI-PMH 邮箱 | 备选 spike |
+| `orcid_public_api` | path Z 兜底（BRA-9.2）：ORCID 公共 API `/person` 端点命中用户主动公开的 email（实际命中率约 0%，**不作为 KPI 指标**） | 兜底 |
+| `manual` | 人工录入 | 兜底 |
+
+> 备注：自 BRA-9.3 起，路径 A `openalex_regex` 仍是 email 补全主路径（已稳态 ≥ 1%）；新增的 path C/D spike 用于验证是否有更便宜的辅助源；path Z `orcid_public_api` 不再计入 email 命中率 KPI，但保留字段 + 写回逻辑（affiliations 价值已独立计 KPI）。
+
+### ORCID profile 覆盖率目标（BRA-9.3 新增 KPI 验收标准）
+
+```sql
+-- 已查询行（orcid_last_fetched 非空）= 分母
+-- orcid_affiliations_json 非空 = 分子
+-- KPI 门槛：>= 50%
+SELECT
+  SUM(CASE WHEN orcid_affiliations_json IS NOT NULL AND orcid_affiliations_json != '' THEN 1 ELSE 0 END) AS covered,
+  SUM(CASE WHEN orcid_last_fetched IS NOT NULL THEN 1 ELSE 0 END) AS queried
+FROM paper_authors
+WHERE chinese_name_probability >= 0.4
+  AND (is_first_author = 1 OR is_corresponding = 1)
+  AND orcid IS NOT NULL AND orcid <> '';
+```
+
+覆盖率 < 50% 视为 ORCID profile 路径不合格（与 BRA-9.3 issue 验收标准对齐）。
+
+## v1.5 变更（BRA-9.3）
+
+- **ORCID 路径 KPI 切换落地**：
+  - schema 顶部版本号 v1.4 → v1.5
+  - 新增「ORCID 路径 KPI 切换」段落（v1.4 spike 结论正式文档化）
+  - `email_source` 枚举表新增 2 个 BRA-9.3 spike 候选值（`crossref_work_meta` / `openaire_meta`），合法值集合 5 → 7
+  - `orcid_public_api` 在表里标记为「path Z 兜底，不作为 email KPI 指标」
+  - 新增 ORCID profile 覆盖率 KPI 计算 SQL + 50% 门槛
+- `validate.js` ORCID 段输出新增 "profile 覆盖率" 行：
+  - 行格式：`- ORCID profile 覆盖率: covered/queried = NN.N% (门槛 50%)`
+  - 当 `covered / queried < 0.5` 时 `fail()`（与 50% 门槛对齐）
+- 不推翻 PR #12 已合入的 schema/CLI/单测：7 列 ORCID 字段 + `idx_pa_orcid_fetched` 索引 + `lib/orcid_enrich.js` + `scripts/orcid_enrich.js` + 24 单测全部保留
