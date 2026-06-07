@@ -350,6 +350,33 @@ function fail(msg) {
     `).get();
     console.log(`- ORCID enrich: ${orcidWith.with_orcid_id || 0} with email_orcid_id, ${orcidWith.fetched || 0} fetched, ${orcidWith.sourced || 0} email_source=orcid_public_api`);
 
+    // BRA-9.3: ORCID profile 覆盖率 KPI（替代 email 命中率）
+    //   covered  = orcid_affiliations_json IS NOT NULL 的行（拿到 affiliations profile 字段）
+    //   queried  = orcid_last_fetched IS NOT NULL 的行（已查询过的作者）
+    //   门槛 50%：低于则 fail（与 schema v1.5 验收标准对齐）
+    const orcidProfileCov = db.prepare(`
+      SELECT
+        SUM(CASE WHEN orcid_last_fetched IS NOT NULL THEN 1 ELSE 0 END) AS queried,
+        SUM(CASE WHEN orcid_last_fetched IS NOT NULL
+                  AND orcid_affiliations_json IS NOT NULL
+                  AND orcid_affiliations_json != '' THEN 1 ELSE 0 END) AS covered
+      FROM paper_authors
+      WHERE chinese_name_probability >= 0.4
+        AND (is_first_author = 1 OR is_corresponding = 1)
+        AND orcid IS NOT NULL AND orcid <> ''
+    `).get();
+    const queried = orcidProfileCov.queried || 0;
+    const covered = orcidProfileCov.covered || 0;
+    if (queried > 0) {
+      const pct = ((covered / queried) * 100).toFixed(1);
+      console.log(`- ORCID profile 覆盖率: ${covered}/${queried} = ${pct}% (门槛 50%)`);
+      if (covered / queried < 0.5) {
+        fail(`ORCID profile 覆盖率 ${pct}% < 50% 门槛`);
+      }
+    } else {
+      console.log('- ORCID profile 覆盖率: (尚无 ORCID 查询行; 跑 orcid_enrich.js 后再校验)');
+    }
+
     // email_orcid_id 格式校验：必须是 0000-0000-0000-0000 或末位 X
     const ORCID_ID_RE = /^\d{4}-\d{4}-\d{4}-[\dX]{4}$/;
     const badOrcidIds = db.prepare(`
