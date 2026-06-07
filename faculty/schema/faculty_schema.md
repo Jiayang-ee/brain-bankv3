@@ -506,3 +506,58 @@ WHERE chinese_name_probability >= 0.4
   - 行格式：`- ORCID profile 覆盖率: covered/queried = NN.N% (门槛 50%)`
   - 当 `covered / queried < 0.5` 时 `fail()`（与 50% 门槛对齐）
 - 不推翻 PR #12 已合入的 schema/CLI/单测：7 列 ORCID 字段 + `idx_pa_orcid_fetched` 索引 + `lib/orcid_enrich.js` + `scripts/orcid_enrich.js` + 24 单测全部保留
+
+### 3a spike 落地（BRA-9.3 决策二：Crossref / OpenAIRE 邮箱抽取）
+
+#### Crossref `/works/{doi}` 邮箱抽取模块
+
+新增 `faculty/scripts/lib/crossref_email.js`：
+- `normalizeDoi()` — 兼容 URL 前缀 / `doi:` 前缀 / 大小写
+- `isValidEmailFormat()` / `isBlacklistedDomain()` — 与 email_extract 对齐（黑名单加 publisher 自身域）
+- `extractEmailsFromWork()` — 扫 5 个塞邮箱位置：
+  1. `author[].affiliation[].name`（最常见）
+  2. `author[].name`（罕见）
+  3. `author[].role[].role` 字符串（罕见）
+  4. `assertion[].value` / `assertion[].name`（极罕见）
+  5. `license[].URL`（极罕见）
+- `fetchWork()` — 20 req/sec 限速 + 4xx/5xx/429 退避（与 ORCID 公共 API 行为对齐）
+- `processWork()` — end-to-end 入口
+
+#### OpenAIRE `/search/researchProducts` 邮箱抽取模块
+
+新增 `faculty/scripts/lib/openaire_email.js`：
+- `extractEmailsFromJson()` — walk JSON 节点；`field:email` / `field:@email` / `field:mail` / `field:contact` 等邮箱关键字优先
+- `fetchByDoi()` — 5 req/sec 限速 + 退避策略
+- `processDoi()` — end-to-end 入口
+- 黑名单加 `openaire.eu` / `github.com` / `gitlab.com` / `bitbucket.org` / `academia.edu` / `researchgate.net` / `linkedin.com`（1,000 样本 spike 跑出来的噪声）
+
+#### CLI 入口
+
+新增 `faculty/scripts/crossref_email_enrich.js` / `faculty/scripts/openaire_email_enrich.js`：
+- `--all` / `--doi <doi>` / `--sample N` / `--max-queries N` / `--dry-run` / `--out DIR` / `--verbose`
+- 写 `faculty/data/real-<DATE>/{crossref,openaire}_email_query_log.jsonl` 审计行
+- 写 `faculty/data/real-<DATE>/{crossref,openaire}_email_summary.json` 命中汇总
+- 退出码 0/1/2 与 ORCID 路径对齐
+
+#### 3a spike 1,000 真实 DOI 跑批结果（2026-06-07）
+
+详细命中明细 + ROI 决策见 `faculty/data/real-2026-06-07/SUMMARY.md` + `RELEASE_NOTES.md` + 5 asset release artifact。
+
+| 维度 | Crossref | OpenAIRE |
+| --- | ---: | ---: |
+| DOI 池 | 1,000 | 1,000 |
+| 命中率（raw） | **0%** | **0.4%** |
+| 命中率（去噪后） | 0% | **0.2%** |
+| 真失败 | 0 | 0 |
+| 退出码 | 0 | 0 |
+
+**ROI 决策（BRA-9.3 3a 关停）**：
+- Crossref 0% + OpenAIRE 0.2% 都 < 0.5% 门槛（issue 风险段已预设关停路径）
+- **关停 3a**，不再投入 3b/3c spike（3b 反爬风险 BRA-7.3 同质，3c 覆盖度 < 5% 论文）
+- email 路径天花板即现状：OpenAlex path A 2.18%（BRA-9.1）是唯一稳定来源，不再加新 spike
+
+#### 新增单测
+
+- `crossref_email.test.js` — 30 个测试用例
+- `openaire_email.test.js` — 16 个测试用例（含黑名单域 8 个）
+- 总单测 232 → 278（+46）

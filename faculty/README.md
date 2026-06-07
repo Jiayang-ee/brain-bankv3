@@ -101,13 +101,13 @@ node faculty/scripts/photos.js --all --max-profiles 100 --out /tmp/fo
 ## 校验
 
 ```bash
-node faculty/scripts/tests/run.js   # 194 个单元测试
+node faculty/scripts/tests/run.js   # 278 个单元测试
 node faculty/scripts/validate.js     # 校验跑批产出的数据
 ```
 
 期望输出末尾：
-- `194 tests, 0 failed`（BRA-9.1 +15：email_extract 模块）
-- `VALIDATION OK`（BRA-9.1 段：emails 字段、覆盖率 >= 1%、格式校验、长度上限、黑名单域、enum 校验 6 项）
+- `278 tests, 0 failed`（BRA-9.1 +15：email_extract / BRA-9.2 +24：orcid_enrich / BRA-9.3 +30+16：crossref_email + openaire_email）
+- `VALIDATION OK`（BRA-9.1 段：emails 字段、覆盖率 >= 1%、格式校验、长度上限、黑名单域、enum 校验 6 项；BRA-9.2 段：ORCID 7 列 + JSON 合法率 + email_source / email_orcid_id 一致性 + orcid_query_log.jsonl 解析；BRA-9.3 段：ORCID profile 覆盖率 >= 50%）
 - `school coverage: 50/50 (OK)`
 - `headshot status distribution: {"success":...,"no_photo":...,...}`
 
@@ -250,6 +250,11 @@ VALIDATION OK
 
 - **BRA-8（教师照片）**：读取 `candidates` 表的 `local_path` + 解析 `<img src>`，把头像归档到 `html/.../photos/`；写入 `candidates.headshot_url` / `headshot_local_path`（schema 已在 `faculty_schema.md` 留位）。
 - **BRA-9（期刊作者）**：复用 `looksChinese()` 与 `candidates` 表 schema，把期刊作者候选并入 `source_kind='journal_author'`。
+- **BRA-9.1（OpenAlex 邮箱 enrich）**：`scripts/papers.js --all` 跑完自动落 `paper_authors.email_raw` / `email_source='openalex_regex'`。
+- **BRA-9.2（ORCID 公共 API enrich）**：`scripts/orcid_enrich.js --all` 跑完落 7 列 ORCID profile（affiliations 价值已独立计 KPI，email 命中率不作为指标）。
+- **BRA-9.3（email 路径 pivot + ORCID KPI 切换）**：
+  - ORCID 路径 KPI 已从 email 命中率改为 profile 覆盖率（schema v1.5 / validate.js 校验门槛 50%）
+  - `scripts/crossref_email_enrich.js --all` / `scripts/openaire_email_enrich.js --all`（3a spike 工具，1,000 样本命中率 < 0.5% 触顶关停）
 - **BRA-10（人工审核）**：直接打开 `faculty.db`，按 `school_rank` / `category` / `chinese_name_probability` / `review_status` 筛选，编辑 `review_status` 与 `review_notes` 即可持久化（DB 已在原表留字段）。
 
 ## 已知限制

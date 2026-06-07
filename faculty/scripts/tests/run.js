@@ -24,6 +24,8 @@ const testFiles = [
   './papers_flow.test.js',
   './email_extract.test.js',
   './orcid_enrich.test.js',
+  './crossref_email.test.js',
+  './openaire_email.test.js',
 ];
 
 let totalRun = 0;
