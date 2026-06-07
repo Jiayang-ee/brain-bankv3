@@ -31,6 +31,10 @@ const EMAIL_SOURCE_PUBLISHER_WILEY = 'publisher_wiley';
 const EMAIL_SOURCE_PUBLISHER_ELSEVIER = 'publisher_elsevier';
 const EMAIL_SOURCE_ORCID_PUBLIC_API = 'orcid_public_api';
 const EMAIL_SOURCE_MANUAL = 'manual';
+// 生产合法值 5 个。BRA-9.3 3a spike 候选值 `crossref_work_meta` / `openaire_meta`
+// 因 ROI 关停（详见 schema/faculty_schema.md v1.5 段），暂不加入 VALID_SOURCES；
+// 未来如重新激活，需同时改此处 + scripts/validate.js VALID_SOURCES +
+// tests/email_extract.test.js 长度断言 + schema 文档，4 处同步升级。
 const VALID_SOURCES = [
   EMAIL_SOURCE_OPENALEX_REGEX,
   EMAIL_SOURCE_PUBLISHER_WILEY,
