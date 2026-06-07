@@ -296,6 +296,10 @@ function fail(msg) {
               }
             }
             // email_source 枚举校验
+            // 生产合法值 5 个（与 lib/email_extract.js VALID_SOURCES 对齐）。
+            // 2 个 spike 候选值（crossref_work_meta / openaire_meta）3a spike 关停
+            // 后不在这里启用；如未来重新激活，需同时改此处 + lib/email_extract.js
+            // + email_extract.test.js 长度断言 + schema v1.5 文档，4 处同步升级。
             const VALID_SOURCES = [
               'openalex_regex', 'publisher_wiley', 'publisher_elsevier', 'orcid_public_api', 'manual',
             ];
