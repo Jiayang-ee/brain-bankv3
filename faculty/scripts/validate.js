@@ -297,7 +297,7 @@ function fail(msg) {
             }
             // email_source 枚举校验
             const VALID_SOURCES = [
-              'openalex_regex', 'publisher_wiley', 'publisher_elsevier', 'manual',
+              'openalex_regex', 'publisher_wiley', 'publisher_elsevier', 'orcid_public_api', 'manual',
             ];
             const badSource = db.prepare(`
               SELECT DISTINCT email_source FROM paper_authors
@@ -334,6 +334,115 @@ function fail(msg) {
     }
     if (bad > 0) fail(`${name}: ${bad}/${lines.length} invalid JSONL rows`);
     else console.log(`- ${name}: ${lines.length} rows valid`);
+  }
+
+  // ---- BRA-9.2: ORCID enrich 校验 ----
+  const hasOrcidCols = db.prepare(`
+    SELECT name FROM pragma_table_info('paper_authors') WHERE name = 'email_orcid_id'
+  `).get();
+  if (hasOrcidCols) {
+    const orcidWith = db.prepare(`
+      SELECT
+        SUM(CASE WHEN email_orcid_id IS NOT NULL AND email_orcid_id != '' THEN 1 ELSE 0 END) AS with_orcid_id,
+        SUM(CASE WHEN orcid_last_fetched IS NOT NULL THEN 1 ELSE 0 END) AS fetched,
+        SUM(CASE WHEN email_source = 'orcid_public_api' THEN 1 ELSE 0 END) AS sourced
+      FROM paper_authors
+    `).get();
+    console.log(`- ORCID enrich: ${orcidWith.with_orcid_id || 0} with email_orcid_id, ${orcidWith.fetched || 0} fetched, ${orcidWith.sourced || 0} email_source=orcid_public_api`);
+
+    // email_orcid_id 格式校验：必须是 0000-0000-0000-0000 或末位 X
+    const ORCID_ID_RE = /^\d{4}-\d{4}-\d{4}-[\dX]{4}$/;
+    const badOrcidIds = db.prepare(`
+      SELECT id, email_orcid_id FROM paper_authors
+      WHERE email_orcid_id IS NOT NULL AND email_orcid_id != ''
+        AND email_orcid_id NOT GLOB '????-????-????-????'
+    `).all();
+    if (badOrcidIds.length > 0) {
+      fail(`email_orcid_id missing dash format: ${badOrcidIds.length}`);
+      for (const b of badOrcidIds.slice(0, 5)) {
+        console.error(`   ${b.id} email_orcid_id=${JSON.stringify(b.email_orcid_id)}`);
+      }
+    }
+    const badOrcidFormat = db.prepare(`
+      SELECT email_orcid_id FROM paper_authors
+      WHERE email_orcid_id IS NOT NULL AND email_orcid_id != ''
+    `).all().filter((r) => !ORCID_ID_RE.test(r.email_orcid_id));
+    if (badOrcidFormat.length > 0) {
+      fail(`email_orcid_id format invalid: ${badOrcidFormat.length}`);
+      for (const b of badOrcidFormat.slice(0, 5)) {
+        console.error(`   ${JSON.stringify(b.email_orcid_id)}`);
+      }
+    }
+
+    // email_orcid_id 与 email_source 一致性：source='orcid_public_api' 的行 email_orcid_id 必须非空且形如 ORCID
+    const inconsistentOrcidSource = db.prepare(`
+      SELECT id, email_orcid_id, email_source FROM paper_authors
+      WHERE email_source = 'orcid_public_api'
+        AND (email_orcid_id IS NULL OR email_orcid_id = ''
+             OR email_orcid_id NOT GLOB '????-????-????-????')
+    `).all();
+    if (inconsistentOrcidSource.length > 0) {
+      fail(`email_source=orcid_public_api but email_orcid_id missing/invalid: ${inconsistentOrcidSource.length}`);
+      for (const r of inconsistentOrcidSource.slice(0, 5)) {
+        console.error(`   ${r.id} email_orcid_id=${JSON.stringify(r.email_orcid_id)} source=${r.email_source}`);
+      }
+    } else {
+      const sourced = orcidWith.sourced || 0;
+      if (sourced > 0) console.log(`  email_source / email_orcid_id consistency: OK (${sourced} rows)`);
+    }
+
+    // 3 个 JSON 列必须可解析
+    for (const col of ['orcid_external_ids_json', 'orcid_affiliations_json', 'orcid_profile_json']) {
+      const badJson = db.prepare(`
+        SELECT id FROM paper_authors
+        WHERE ${col} IS NOT NULL AND ${col} != ''
+          AND json_valid(${col}) = 0
+      `).all();
+      if (badJson.length > 0) {
+        fail(`${col}: ${badJson.length}/${db.prepare(`SELECT COUNT(*) AS n FROM paper_authors WHERE ${col} IS NOT NULL AND ${col} != ''`).get().n} invalid JSON`);
+      } else {
+        const n = db.prepare(`SELECT COUNT(*) AS n FROM paper_authors WHERE ${col} IS NOT NULL AND ${col} != ''`).get().n;
+        if (n > 0) console.log(`  ${col}: ${n} rows, all valid JSON`);
+      }
+    }
+
+    // 成功 (200) 的行 OR 字段都非空；404 沉默返回的行 profile_json 必为 NULL（设计上接受）
+    // 注意：orcid_last_modified 是 ORCID API 响应头（Last-Modified），不是所有 profile 都带，所以允许 NULL
+    const fetchedRowMissingFields = db.prepare(`
+      SELECT id FROM paper_authors
+      WHERE orcid_last_fetched IS NOT NULL
+        AND orcid_profile_json IS NOT NULL AND orcid_profile_json != ''
+        AND (email_orcid_id IS NULL OR email_orcid_id = '')
+    `).all();
+    if (fetchedRowMissingFields.length > 0) {
+      fail(`orcid_last_fetched set but email_orcid_id missing (200 行): ${fetchedRowMissingFields.length}`);
+      for (const r of fetchedRowMissingFields.slice(0, 5)) {
+        console.error(`   ${r.id}`);
+      }
+    }
+    // 404 沉默返回行：last_fetched 写了但 profile_json 必为 NULL（不算错）
+    const silenceRows = db.prepare(`
+      SELECT id FROM paper_authors
+      WHERE orcid_last_fetched IS NOT NULL
+        AND (orcid_profile_json IS NULL OR orcid_profile_json = '')
+    `).all();
+    if (silenceRows.length > 0) {
+      console.log(`- orcid 404 沉默行: ${silenceRows.length}（profile_json 必为 NULL，符合设计）`);
+    }
+
+    // orcid_query_log.jsonl 可解析
+    const orcidLogPath = path.join(DATA_DIR, 'orcid_query_log.jsonl');
+    if (fs.existsSync(orcidLogPath)) {
+      const lines = fs.readFileSync(orcidLogPath, 'utf8').split('\n').filter(Boolean);
+      let bad = 0;
+      for (const line of lines) {
+        try { JSON.parse(line); } catch (_) { bad += 1; }
+      }
+      if (bad > 0) fail(`orcid_query_log.jsonl: ${bad}/${lines.length} invalid JSONL rows`);
+      else console.log(`- orcid_query_log.jsonl: ${lines.length} rows valid`);
+    }
+  } else {
+    console.log('- ORCID enrich: (not yet created; run orcid_enrich.js to seed)');
   }
 
   if (process.exitCode === 1) console.error('\nVALIDATION FAILED');

@@ -1,8 +1,8 @@
-# Faculty Crawler Schema (v1.3)
+# Faculty Crawler Schema (v1.4)
 
 > 维护方：后端开发工程师 (multica-agent: `a96a336b`)
-> 适用任务：BRA-7 学校官网教师页入口发现与本地归档爬虫 / BRA-8 教师照片下载与抓取状态日志 / BRA-9 期刊论文 API 查询与华人姓名高召回初筛 / BRA-9.1 作者邮箱 enrich
-> 数据版本：v1.3
+> 适用任务：BRA-7 学校官网教师页入口发现与本地归档爬虫 / BRA-8 教师照片下载与抓取状态日志 / BRA-9 期刊论文 API 查询与华人姓名高召回初筛 / BRA-9.1 作者邮箱 enrich / BRA-9.2 ORCID 公共 API 反向查询 enrich
+> 数据版本：v1.4
 > 关联输入：`qs50/data/qs50_schools.json` (v1.0) + `qs50/data/qs50_departments.json` (v2.1) + `faculty/data/journals.csv`（BRA-9 附件）
 > 关联下游：BRA-10（人工审核查看器）
 
@@ -380,13 +380,14 @@ CREATE INDEX IF NOT EXISTS idx_pa_email_source ON paper_authors(email_source);
 
 `api_unsupported` 属于预期路径（CN-only 中文期刊），不计入 failure / 不影响退出码。
 
-### `paper_authors.email_source` 枚举（BRA-9.1 引入）
+### `paper_authors.email_source` 枚举（BRA-9.1 引入，BRA-9.2 扩展）
 
 | 值 | 含义 |
 | --- | --- |
 | `openalex_regex` | path A 兜底：OpenAlex `raw_affiliation_string` 正则命中 |
-| `publisher_wiley` | path B（预留，BRA-9.2）：Wiley 论文详情页抽取 |
-| `publisher_elsevier` | path B（预留，BRA-9.2）：Elsevier 论文详情页抽取 |
+| `publisher_wiley` | path B（预留，后续 spike）：Wiley 论文详情页抽取 |
+| `publisher_elsevier` | path B（预留，后续 spike）：Elsevier 论文详情页抽取 |
+| `orcid_public_api` | path C（BRA-9.2）：ORCID 公共 API `/person` 端点命中用户主动公开的 email |
 | `manual` | 人工录入 |
 
 ### 邮箱覆盖率目标（BRA-9.1 验收标准）
@@ -405,3 +406,43 @@ CREATE INDEX IF NOT EXISTS idx_pa_email_source ON paper_authors(email_source);
 - 新增测试 `email_extract.test.js`（15 个测试用例）
 - `validate.js` 新增 4 段校验：覆盖率（>= 1%）、邮箱格式（GLOB + 正则）、长度上限（<= 254）、黑名单域、`email_source` 枚举
 - `paper_authors.jsonl` 流水增加 `email_raw` / `email_source` / `email_match_context` 三个字段（向后兼容：未命中作者三件套都是 null）
+
+## v1.4 变更（BRA-9.2）
+
+- `paper_authors` 表新增 7 个 nullable 列（`orcid` 字段本身已存在）：
+  - `email_orcid_id TEXT` — 命中邮箱的 ORCID iD（形如 `0000-0000-0000-0000` 或末位 `X`）
+  - `orcid_credit_name TEXT` — ORCID profile 上的 display name
+  - `orcid_external_ids_json TEXT` — Scopus / ResearcherID / ISNI 等 external IDs（JSON array）
+  - `orcid_affiliations_json TEXT` — employment + education history（JSON array — killer feature，识别跳槽）
+  - `orcid_last_modified TEXT` — ORCID profile last-modified 时间（HTTP `Last-Modified` 头）
+  - `orcid_last_fetched TEXT` — 我们打 ORCID API 的时间（audit / 30 天增量窗口）
+  - `orcid_profile_json TEXT` — 完整 `/person` 响应（冷字段兜底；平均 ~1 KB/作者）
+- 新增索引 `idx_pa_orcid_fetched ON paper_authors(orcid, orcid_last_fetched)` — 增量重跑友好
+- `email_source` 枚举增加 `'orcid_public_api'`，合法值集合 4 → 5
+- 新增模块 `faculty/scripts/lib/orcid_enrich.js`：
+  - `normalizeOrcidId()` — 兼容 19 位短横线 / URL 前缀 / 16 位裸数字
+  - `extractEmailsFromPerson()` / `extractExternalIds()` / `extractAffiliationsFromPerson()` / `extractCreditName()`
+  - `fetchPerson()` — 5 req/sec 限速 + 4xx/5xx/429 退避策略（4xx 不重试；429/5xx 指数退避 1s/2s/4s 最多 3 次）
+  - `processAuthor()` — 把 fetchPerson 结果整理成 `store.recordOrcidProfile` 期望的入参
+- 新增脚本 `faculty/scripts/orcid_enrich.js`（CLI 入口）：
+  - `--all` / `--orcid XXXX-XXXX-XXXX-XXXX` / `--max-queries N` / `--force` / `--dry-run` / `--out DIR`
+  - 输入过滤：`chinese_name_probability >= 0.4 AND (is_first_author=1 OR is_corresponding=1) AND email_raw IS NULL AND orcid 非空`
+  - 30 天增量窗口（`--force` 跳过）
+  - 写 `faculty/data/real-<DATE>/orcid_query_log.jsonl` 审计行（HTTP status / latency / response hash）
+- `storage.js` 新增 `recordOrcidProfile()` / `selectOrcidLookupRows()` / `getOrcidLookupStats()` 三个 helper
+- `validate.js` 新增 ORCID 段校验：
+  - `email_orcid_id` 格式（`0000-0000-0000-0000` 或末位 `X`）
+  - `email_source='orcid_public_api'` 与 `email_orcid_id` 一致性
+  - 3 个 JSON 列（`orcid_external_ids_json` / `orcid_affiliations_json` / `orcid_profile_json`）`json_valid()` 合法率
+  - `orcid_last_fetched` 非空的行 companion 字段（`email_orcid_id` / `orcid_last_modified` / `orcid_profile_json`）都必须非空
+  - `orcid_query_log.jsonl` JSONL 合法率
+- 新增测试 `orcid_enrich.test.js`（~24 个测试用例）：
+  - `normalizeOrcidId` 各种输入形式
+  - `extractEmailsFromPerson` / `extractExternalIds` / `extractAffiliationsFromPerson` / `extractCreditName` 各种边界
+  - `isValidEmailFormat` 边界（黑名单 / ISSN-like / IP / 长度）
+  - `processAuthor` 用 mock fetch 测 200+email / 200 空 email / 404 / 403（不重试） / 429 退避 / 5xx 退避 / invalid orcid
+  - `store.recordOrcidProfile` 集成测试（含 `COALESCE` 保护）
+  - `store.selectOrcidLookupRows` filter / 30 天窗口 / `--force` 重跑
+- `email_extract.test.js` enum 校验更新（4 → 5）
+- `paper_authors.jsonl` 流水增加 7 个 ORCID 字段（向后兼容：未跑 spike 的作者都是 null）
+- `storage.js` 的 `createStore()` 用 `ensureColumn()` 幂等迁移；新跑 + 老 DB 共存

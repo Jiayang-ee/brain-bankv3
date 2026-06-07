@@ -176,8 +176,16 @@ CREATE TABLE IF NOT EXISTS paper_authors (
   is_target_candidate       INTEGER NOT NULL DEFAULT 0,  -- (first/last/corresponding) AND chinese_likely
   -- BRA-9.1 邮箱 enrich：path A (openalex_regex) 兜底，path B (publisher_*) 预留
   email_raw                 TEXT,                -- 抽到的邮箱原文
-  email_source              TEXT,                -- 'openalex_regex' | 'publisher_wiley' | 'publisher_elsevier' | 'manual'
+  email_source              TEXT,                -- 'openalex_regex' | 'publisher_wiley' | 'publisher_elsevier' | 'orcid_public_api' | 'manual'
   email_match_context       TEXT,                -- 命中哪条 affiliation 字符串（截断 500 字符）
+  -- BRA-9.2 ORCID 公共 API 反向查询 enrich（spike）
+  email_orcid_id            TEXT,                -- 命中邮箱的 ORCID iD（形如 0000-0000-0000-0000 或 0000-0000-0000-000X）
+  orcid_credit_name         TEXT,                -- ORCID profile 上的 display name（CRIS 名称）
+  orcid_external_ids_json   TEXT,                -- Scopus / ResearcherID / ISNI 等 external-ids（JSON array）
+  orcid_affiliations_json   TEXT,                -- employment history（JSON array — killer feature，识别跳槽）
+  orcid_last_modified       TEXT,                -- ORCID profile last update（ISO8601）
+  orcid_last_fetched        TEXT,                -- 我们打 ORCID API 的时间（audit / 增量重跑）
+  orcid_profile_json        TEXT,                -- 完整 /person 响应（冷字段兜底；平均 ~1KB/作者）
   first_seen_at             TEXT    NOT NULL,
   last_seen_at              TEXT    NOT NULL,
   FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE
@@ -188,6 +196,8 @@ CREATE INDEX IF NOT EXISTS idx_pa_target   ON paper_authors(is_target_candidate)
 CREATE INDEX IF NOT EXISTS idx_pa_first    ON paper_authors(is_first_author);
 CREATE INDEX IF NOT EXISTS idx_pa_corr     ON paper_authors(is_corresponding);
 CREATE INDEX IF NOT EXISTS idx_pa_email_source ON paper_authors(email_source);
+-- BRA-9.2: 增量重跑友好 — "最近被查过"的 ORCID 跳过
+CREATE INDEX IF NOT EXISTS idx_pa_orcid_fetched ON paper_authors(orcid, orcid_last_fetched);
 `;
 
 function nowIso() { return new Date().toISOString(); }
@@ -224,6 +234,15 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
   ensureColumn(db, 'paper_authors', 'email_source', 'TEXT');
   ensureColumn(db, 'paper_authors', 'email_match_context', 'TEXT');
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_pa_email_source ON paper_authors(email_source)`); } catch (_) { /* ignore */ }
+  // 幂等迁移：BRA-9.2 给 paper_authors 加 7 个 ORCID enrich 列（orcid 字段本身已存在）
+  ensureColumn(db, 'paper_authors', 'email_orcid_id', 'TEXT');
+  ensureColumn(db, 'paper_authors', 'orcid_credit_name', 'TEXT');
+  ensureColumn(db, 'paper_authors', 'orcid_external_ids_json', 'TEXT');
+  ensureColumn(db, 'paper_authors', 'orcid_affiliations_json', 'TEXT');
+  ensureColumn(db, 'paper_authors', 'orcid_last_modified', 'TEXT');
+  ensureColumn(db, 'paper_authors', 'orcid_last_fetched', 'TEXT');
+  ensureColumn(db, 'paper_authors', 'orcid_profile_json', 'TEXT');
+  try { db.exec(`CREATE INDEX IF NOT EXISTS idx_pa_orcid_fetched ON paper_authors(orcid, orcid_last_fetched)`); } catch (_) { /* ignore */ }
 
   const candidatesJsonlPath = path.join(dataDir, 'candidates.jsonl');
   const crawlLogJsonlPath = path.join(dataDir, 'crawl_log.jsonl');
@@ -569,6 +588,59 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
       last_seen_at = excluded.last_seen_at
   `);
 
+  // BRA-9.2: ORCID enrich 写回（per-author，按 id 定位）
+  // email_raw / email_source 用 CASE 保护：只在该行 email_raw 当前为 NULL 时才用 ORCID 命中值覆盖
+  // （不要用 COALESCE(@x, col) — 那只保护 NULL 入参；我们要保护 NULL 已有值）
+  const updateOrcidProfile = db.prepare(`
+    UPDATE paper_authors SET
+      email_orcid_id          = @email_orcid_id,
+      orcid_credit_name       = @orcid_credit_name,
+      orcid_external_ids_json = @orcid_external_ids_json,
+      orcid_affiliations_json = @orcid_affiliations_json,
+      orcid_last_modified     = @orcid_last_modified,
+      orcid_last_fetched      = @orcid_last_fetched,
+      orcid_profile_json      = @orcid_profile_json,
+      email_raw               = CASE WHEN email_raw IS NULL THEN @email_raw ELSE email_raw END,
+      email_source            = CASE WHEN email_raw IS NULL THEN @email_source ELSE email_source END,
+      last_seen_at            = @last_seen_at
+    WHERE id = @id
+  `);
+
+  // BRA-9.2: 选出待 ORCID lookup 的 paper_authors 行
+  //   filter: chinese_name_probability >= 0.4 AND (first OR corresponding) AND email_raw IS NULL AND orcid 非空
+  //   增量: 跳过 orcid_last_fetched 距今 < 30 天的
+  const selectOrcidLookupCandidates = db.prepare(`
+    SELECT id, paper_id, author_name, orcid, orcid_last_fetched
+    FROM paper_authors
+    WHERE chinese_name_probability >= 0.4
+      AND (is_first_author = 1 OR is_corresponding = 1)
+      AND email_raw IS NULL
+      AND orcid IS NOT NULL
+      AND orcid <> ''
+      AND (@force = 1
+           OR orcid_last_fetched IS NULL
+           OR julianday('now') - julianday(orcid_last_fetched) >= 30)
+    ORDER BY orcid ASC, id ASC
+    LIMIT @limit
+  `);
+  const orcidLookupStats = db.prepare(`
+    SELECT
+      COUNT(*) AS total,
+      SUM(CASE WHEN email_orcid_id IS NOT NULL THEN 1 ELSE 0 END) AS with_orcid_email,
+      SUM(CASE WHEN orcid_last_fetched IS NOT NULL THEN 1 ELSE 0 END) AS fetched
+    FROM paper_authors
+    WHERE chinese_name_probability >= 0.4
+      AND (is_first_author = 1 OR is_corresponding = 1)
+      AND orcid IS NOT NULL
+      AND orcid <> ''
+  `);
+  const orcidEmailSourceStats = db.prepare(`
+    SELECT email_source, COUNT(*) AS n
+    FROM paper_authors
+    WHERE email_raw IS NOT NULL
+    GROUP BY email_source
+  `);
+
   const journalStatsQ = db.prepare(`
     SELECT
       query_status, COUNT(*) AS n
@@ -680,6 +752,36 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
     return row;
   }
 
+  // ---- BRA-9.2: ORCID enrich helpers ----
+  function recordOrcidProfile(entry) {
+    const row = {
+      id: entry.id,
+      email_orcid_id: entry.emailOrcidId ?? null,
+      orcid_credit_name: entry.orcidCreditName ?? null,
+      orcid_external_ids_json: entry.orcidExternalIdsJson ?? null,
+      orcid_affiliations_json: entry.orcidAffiliationsJson ?? null,
+      orcid_last_modified: entry.orcidLastModified ?? null,
+      orcid_last_fetched: entry.orcidLastFetched || nowIso(),
+      orcid_profile_json: entry.orcidProfileJson ?? null,
+      email_raw: entry.emailRaw ?? null,
+      email_source: entry.emailSource ?? null,
+      last_seen_at: nowIso(),
+    };
+    updateOrcidProfile.run(row);
+    return row;
+  }
+
+  function selectOrcidLookupRows({ limit = 100, force = false } = {}) {
+    return selectOrcidLookupCandidates.all({ limit, force: force ? 1 : 0 });
+  }
+
+  function getOrcidLookupStats() {
+    const agg = orcidLookupStats.get() || { total: 0, with_orcid_email: 0, fetched: 0 };
+    const bySource = {};
+    for (const r of orcidEmailSourceStats.all()) bySource[r.email_source || 'null'] = r.n;
+    return { ...agg, by_source: bySource };
+  }
+
   function getJournalStats() {
     const dist = {};
     for (const r of journalStatsQ.all()) dist[r.query_status || 'pending'] = r.n;
@@ -724,6 +826,9 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
     recordJournal,
     recordPaper,
     recordPaperAuthor,
+    recordOrcidProfile,
+    selectOrcidLookupRows,
+    getOrcidLookupStats,
     selectPhotoCandidates,
     getHeadshotStats,
     getJournalStats,

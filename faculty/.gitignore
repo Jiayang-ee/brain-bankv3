@@ -13,6 +13,7 @@ data/real-*/papers.jsonl
 data/real-*/paper_authors.jsonl
 data/real-*/journals.jsonl
 data/real-*/crawl_log.jsonl
+data/real-*/orcid_query_log.jsonl
 data/real-*/faculty.db-journal
 data/real-*/faculty.db-wal
 data/real-*/faculty.db-shm
