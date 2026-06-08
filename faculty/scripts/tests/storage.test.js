@@ -250,4 +250,164 @@ test('createStore: getHeadshotStats 正确分类', () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+// --- BRA-10.1 paper_authors 审核字段 ---
+
+// 最小可用的 paper 写入行（满足 paper_authors 的外键约束）
+// papers.journal_id 外键引用 journals.id，必须先 recordJournal
+function seedPaper(store, { id, journalName = 'MS', title = 'Test' } = {}) {
+  store.recordJournal({
+    id: 'j-' + id,
+    sourceFile: 'test.csv',
+    journalNameRaw: journalName,
+    journalSystem: '英文期刊',
+    schoolLevel: 'A+',
+    issnPrint: '00251909',
+    queryStatus: 'pending',
+  });
+  store.recordPaper({
+    id,
+    doi: '10.1/' + id,
+    title,
+    journalId: 'j-' + id,
+    journalName,
+    issn: '00251909',
+    publishYear: 2023,
+    publishDate: '2023-01-01',
+    paperType: 'article',
+    source: 'openalex',
+    sourceUrl: 'https://openalex.org/W' + id,
+  });
+}
+
+test('BRA-10.1: paper_authors 默认值 review_status=pending, review_notes=null', () => {
+  const { dir, store } = makeTmpStore();
+  seedPaper(store, { id: 'p1' });
+  store.recordPaperAuthor({
+    id: 'pa1', paperId: 'p1', authorName: 'Wang Xiaoming', authorPosition: 0,
+    isFirstAuthor: true, isLastAuthor: false, isCorresponding: false,
+    chineseNameProbability: 0.8,
+  });
+  const r = store.db.prepare('SELECT review_status, review_notes FROM paper_authors WHERE id = ?').get('pa1');
+  assert.equal(r.review_status, 'pending');
+  assert.equal(r.review_notes, null);
+  store.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('BRA-10.1: recordPaperAuthor 写入 reviewStatus / reviewNotes', () => {
+  const { dir, store } = makeTmpStore();
+  seedPaper(store, { id: 'p1' });
+  store.recordPaperAuthor({
+    id: 'pa1', paperId: 'p1', authorName: 'Wang', authorPosition: 0,
+    isFirstAuthor: true, chineseNameProbability: 0.9,
+    reviewStatus: 'approved',
+    reviewNotes: '已确认是清华教授',
+  });
+  const r = store.db.prepare('SELECT review_status, review_notes FROM paper_authors WHERE id = ?').get('pa1');
+  assert.equal(r.review_status, 'approved');
+  assert.equal(r.review_notes, '已确认是清华教授');
+  store.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('BRA-10.1: updatePaperAuthorReview 写回审核状态/备注', () => {
+  const { dir, store } = makeTmpStore();
+  seedPaper(store, { id: 'p1' });
+  store.recordPaperAuthor({
+    id: 'pa1', paperId: 'p1', authorName: 'Wang', authorPosition: 0,
+    isFirstAuthor: true, chineseNameProbability: 0.9,
+  });
+  const ret = store.updatePaperAuthorReview({
+    id: 'pa1', reviewStatus: 'rejected', reviewNotes: '重名无法判断',
+  });
+  assert.equal(ret.changes, 1);
+  const r = store.db.prepare('SELECT review_status, review_notes FROM paper_authors WHERE id = ?').get('pa1');
+  assert.equal(r.review_status, 'rejected');
+  assert.equal(r.review_notes, '重名无法判断');
+  store.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('BRA-10.1: updatePaperAuthorReview 不修改其他字段', () => {
+  const { dir, store } = makeTmpStore();
+  seedPaper(store, { id: 'p1' });
+  store.recordPaperAuthor({
+    id: 'pa1', paperId: 'p1', authorName: '陈晓', authorPosition: 0,
+    isFirstAuthor: true, isLastAuthor: false, isCorresponding: true,
+    affiliationName: 'SJTU', chineseNameProbability: 0.95,
+    chineseNameReasons: [{ rule: 'cjk_chars_present' }],
+  });
+  store.updatePaperAuthorReview({ id: 'pa1', reviewStatus: 'approved', reviewNotes: 'ok' });
+  const r = store.getPaperAuthor('pa1');
+  assert.equal(r.author_name, '陈晓');
+  assert.equal(r.affiliation_name, 'SJTU');
+  assert.equal(r.is_first_author, 1);
+  assert.equal(r.is_corresponding, 1);
+  assert.equal(r.chinese_name_probability, 0.95);
+  assert.equal(r.review_status, 'approved');
+  assert.equal(r.review_notes, 'ok');
+  store.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('BRA-10.1: upsert 旧 author 时不覆盖人工审核字段（不写入 ON CONFLICT SET）', () => {
+  const { dir, store } = makeTmpStore();
+  seedPaper(store, { id: 'p1' });
+  // 第一次写入：审核员先打 'approved'
+  store.recordPaperAuthor({
+    id: 'pa1', paperId: 'p1', authorName: 'Wang', authorPosition: 0,
+    isFirstAuthor: true, chineseNameProbability: 0.9,
+    reviewStatus: 'approved',
+    reviewNotes: '审核通过',
+  });
+  // 第二次写入：上游重抓时仍然传了 reviewStatus='pending'，但 ON CONFLICT 不更新审核字段
+  store.recordPaperAuthor({
+    id: 'pa1', paperId: 'p1', authorName: 'Wang Updated', authorPosition: 0,
+    isFirstAuthor: true, chineseNameProbability: 0.92,
+  });
+  const r = store.db.prepare('SELECT author_name, chinese_name_probability, review_status, review_notes FROM paper_authors WHERE id = ?').get('pa1');
+  // author_name / chinese_name_probability 应被覆盖
+  assert.equal(r.author_name, 'Wang Updated');
+  assert.equal(r.chinese_name_probability, 0.92);
+  // 审核字段应保留（与 candidates 策略一致）
+  assert.equal(r.review_status, 'approved');
+  assert.equal(r.review_notes, '审核通过');
+  store.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('BRA-10.1: ensureColumn 迁移在旧 DB（无 review 列）上幂等补齐', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bra10-migrate-'));
+  // 1) 先开 store，删除 review_* 列 + 相关索引模拟"老 DB"
+  const s1 = createStore({ dataDir: dir, sqlite });
+  s1.db.exec('DROP INDEX IF EXISTS idx_pa_review');
+  s1.db.exec('ALTER TABLE paper_authors DROP COLUMN review_status');
+  s1.db.exec('ALTER TABLE paper_authors DROP COLUMN review_notes');
+  s1.close();
+
+  // 2) 重新打开：ensureColumn 应当把 review_status / review_notes 补回来
+  const s2 = createStore({ dataDir: dir, sqlite });
+  const cols = s2.db.prepare('PRAGMA table_info(paper_authors)').all().map((c) => c.name);
+  assert.ok(cols.includes('review_status'), 'review_status 应被 ensureColumn 补齐');
+  assert.ok(cols.includes('review_notes'), 'review_notes 应被 ensureColumn 补齐');
+  // 默认值应仍是 'pending' / null（新行才能立即写入审核字段）
+  seedPaper(s2, { id: 'p1' });
+  s2.recordPaperAuthor({
+    id: 'pa1', paperId: 'p1', authorName: 'Wang', authorPosition: 0,
+    isFirstAuthor: true, chineseNameProbability: 0.9,
+  });
+  const r = s2.db.prepare('SELECT review_status, review_notes FROM paper_authors WHERE id = ?').get('pa1');
+  assert.equal(r.review_status, 'pending');
+  assert.equal(r.review_notes, null);
+  s2.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('BRA-10.1: getPaperAuthor 缺失 id 返回 null', () => {
+  const { dir, store } = makeTmpStore();
+  assert.equal(store.getPaperAuthor('not-exist'), null);
+  store.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 module.exports = { tests };
