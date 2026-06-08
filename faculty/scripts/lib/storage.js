@@ -174,15 +174,19 @@ CREATE TABLE IF NOT EXISTS paper_authors (
   chinese_name_reasons      TEXT,                -- JSON array
   chinese_name_negatives    TEXT,                -- JSON array
   is_target_candidate       INTEGER NOT NULL DEFAULT 0,  -- (first/last/corresponding) AND chinese_likely
+  review_status             TEXT    NOT NULL DEFAULT 'pending',  -- 人工审核状态：pending/approved/rejected/needs_review
+  review_notes              TEXT,                -- 审核备注
   first_seen_at             TEXT    NOT NULL,
   last_seen_at              TEXT    NOT NULL,
   FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE
 );
-CREATE INDEX IF NOT EXISTS idx_pa_paper    ON paper_authors(paper_id);
-CREATE INDEX IF NOT EXISTS idx_pa_chs      ON paper_authors(chinese_name_probability);
-CREATE INDEX IF NOT EXISTS idx_pa_target   ON paper_authors(is_target_candidate);
-CREATE INDEX IF NOT EXISTS idx_pa_first    ON paper_authors(is_first_author);
-CREATE INDEX IF NOT EXISTS idx_pa_corr     ON paper_authors(is_corresponding);
+CREATE INDEX IF NOT EXISTS idx_pa_paper      ON paper_authors(paper_id);
+CREATE INDEX IF NOT EXISTS idx_pa_chs        ON paper_authors(chinese_name_probability);
+CREATE INDEX IF NOT EXISTS idx_pa_target     ON paper_authors(is_target_candidate);
+CREATE INDEX IF NOT EXISTS idx_pa_first      ON paper_authors(is_first_author);
+CREATE INDEX IF NOT EXISTS idx_pa_corr       ON paper_authors(is_corresponding);
+-- 注：idx_pa_review 在 ensureColumn 块里 try/catch 幂等创建（避免旧 DB 中 review_status
+--     尚未补齐时直接执行 CREATE INDEX 报错）
 `;
 
 function nowIso() { return new Date().toISOString(); }
@@ -214,6 +218,12 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
   ensureColumn(db, 'candidates', 'headshot_error_detail', 'TEXT');
   ensureColumn(db, 'candidates', 'headshot_source_url', 'TEXT');
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_candidates_headshot_status ON candidates(headshot_crawl_status)`); } catch (_) { /* ignore */ }
+
+  // 幂等迁移：BRA-10.1 给 paper_authors 加 review_status / review_notes 列
+  // （SQLite ADD COLUMN 不可重复，因此用 ensureColumn 跳过已存在的列）
+  ensureColumn(db, 'paper_authors', 'review_status', "TEXT NOT NULL DEFAULT 'pending'");
+  ensureColumn(db, 'paper_authors', 'review_notes', 'TEXT');
+  try { db.exec(`CREATE INDEX IF NOT EXISTS idx_pa_review ON paper_authors(review_status)`); } catch (_) { /* ignore */ }
 
   const candidatesJsonlPath = path.join(dataDir, 'candidates.jsonl');
   const crawlLogJsonlPath = path.join(dataDir, 'crawl_log.jsonl');
@@ -528,13 +538,15 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
       is_first_author, is_last_author, is_corresponding,
       affiliation_raw, affiliation_id, affiliation_name, orcid,
       chinese_name_probability, chinese_name_reasons, chinese_name_negatives,
-      is_target_candidate, first_seen_at, last_seen_at
+      is_target_candidate, review_status, review_notes,
+      first_seen_at, last_seen_at
     ) VALUES (
       @id, @paper_id, @author_name, @author_position,
       @is_first_author, @is_last_author, @is_corresponding,
       @affiliation_raw, @affiliation_id, @affiliation_name, @orcid,
       @chinese_name_probability, @chinese_name_reasons, @chinese_name_negatives,
-      @is_target_candidate, @first_seen_at, @last_seen_at
+      @is_target_candidate, @review_status, @review_notes,
+      @first_seen_at, @last_seen_at
     )
     ON CONFLICT(id) DO UPDATE SET
       author_name = excluded.author_name,
@@ -549,6 +561,7 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
       chinese_name_reasons = excluded.chinese_name_reasons,
       chinese_name_negatives = excluded.chinese_name_negatives,
       is_target_candidate = excluded.is_target_candidate,
+      -- 审核字段由前端/审核员写入；upsert 时不覆盖（与 candidates.review_status 策略一致）
       last_seen_at = excluded.last_seen_at
   `);
 
@@ -570,6 +583,23 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
       SUM(CASE WHEN is_target_candidate = 1 THEN 1 ELSE 0 END) AS target_candidates,
       SUM(CASE WHEN chinese_name_probability >= 0.4 THEN 1 ELSE 0 END) AS chinese_likely
     FROM paper_authors
+  `);
+  // BRA-10.1: 论文作者审核字段更新
+  const updatePaperAuthorReviewStmt = db.prepare(`
+    UPDATE paper_authors SET
+      review_status = @review_status,
+      review_notes  = @review_notes
+    WHERE id = @id
+  `);
+  const selectPaperAuthorById = db.prepare(`
+    SELECT id, paper_id, author_name, author_position,
+           is_first_author, is_last_author, is_corresponding,
+           affiliation_raw, affiliation_id, affiliation_name, orcid,
+           chinese_name_probability, chinese_name_reasons, chinese_name_negatives,
+           is_target_candidate, review_status, review_notes,
+           first_seen_at, last_seen_at
+    FROM paper_authors
+    WHERE id = ?
   `);
 
   function recordJournal(entry) {
@@ -634,6 +664,8 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
   }
 
   function recordPaperAuthor(entry) {
+    // 审核字段：首次写入取 entry.reviewStatus / entry.reviewNotes（默认 'pending' / null）；
+    // 冲突时由 ON CONFLICT 保留原值，因此上游重抓不会覆盖审核员填过的状态/备注
     const row = {
       id: entry.id,
       paper_id: entry.paperId,
@@ -650,12 +682,31 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
       chinese_name_reasons: JSON.stringify(entry.chineseNameReasons || []),
       chinese_name_negatives: JSON.stringify(entry.chineseNameNegatives || []),
       is_target_candidate: entry.isTargetCandidate ? 1 : 0,
+      review_status: entry.reviewStatus || 'pending',
+      review_notes: entry.reviewNotes ?? null,
       first_seen_at: entry.firstSeenAt || nowIso(),
       last_seen_at: entry.lastSeenAt || nowIso(),
     };
     insertPaperAuthor.run(row);
     writePaperAuthors(`${JSON.stringify(row)}\n`);
     return row;
+  }
+
+  // BRA-10.1: 写回论文作者的人工审核状态/备注
+  // 仅修改 review_status / review_notes；其余字段保持原值
+  function updatePaperAuthorReview({ id, reviewStatus, reviewNotes }) {
+    if (!id) throw new Error('updatePaperAuthorReview: id required');
+    const info = updatePaperAuthorReviewStmt.run({
+      id,
+      review_status: reviewStatus || 'pending',
+      review_notes: reviewNotes ?? null,
+    });
+    return { changes: info.changes };
+  }
+
+  // BRA-10.1: 按 id 读回单条 paper_author（含审核字段），便于前端展示与回显
+  function getPaperAuthor(id) {
+    return selectPaperAuthorById.get(id) || null;
   }
 
   function getJournalStats() {
@@ -702,6 +753,8 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
     recordJournal,
     recordPaper,
     recordPaperAuthor,
+    updatePaperAuthorReview,
+    getPaperAuthor,
     selectPhotoCandidates,
     getHeadshotStats,
     getJournalStats,
