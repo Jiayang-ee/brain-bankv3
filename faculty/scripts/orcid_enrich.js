@@ -8,6 +8,7 @@
 //   node faculty/scripts/orcid_enrich.js --force                        # 忽略 30 天增量窗口
 //   node faculty/scripts/orcid_enrich.js --dry-run                      # 不写 DB、不发网络
 //   node faculty/scripts/orcid_enrich.js --out /tmp/bra92               # 自定义输出目录
+//   node faculty/scripts/orcid_enrich.js --re-extract                   # BRA-9.4.A：从已保存的 orcid_profile_json 重算派生列（不发 API）
 //   node faculty/scripts/orcid_enrich.js --verbose
 //
 // 退出码：
@@ -30,7 +31,14 @@ const path = require('node:path');
 const sqlite = require('node:sqlite');
 
 const { createStore } = require('./lib/storage.js');
-const { createOrcidEnrich, normalizeOrcidId } = require('./lib/orcid_enrich.js');
+const {
+  createOrcidEnrich,
+  normalizeOrcidId,
+  extractCreditName,
+  extractExternalIds,
+  extractAffiliationsFromPerson,
+  reextractFromPersonJson,
+} = require('./lib/orcid_enrich.js');
 
 function parseArgs(argv) {
   const out = {
@@ -41,6 +49,7 @@ function parseArgs(argv) {
     maxQueries: 0,
     force: false,
     out: null,
+    reExtract: false,
   };
   for (let i = 2; i < argv.length; i += 1) {
     const a = argv[i];
@@ -51,8 +60,9 @@ function parseArgs(argv) {
     else if (a === '--max-queries') out.maxQueries = Number(argv[++i]);
     else if (a === '--force') out.force = true;
     else if (a === '--out') out.out = argv[++i];
+    else if (a === '--re-extract') out.reExtract = true;
     else if (a === '--help' || a === '-h') {
-      console.log('Usage: node faculty/scripts/orcid_enrich.js [--all | --orcid XXXX-XXXX-XXXX-XXXX] [--max-queries N] [--force] [--dry-run] [--out DIR] [--verbose]');
+      console.log('Usage: node faculty/scripts/orcid_enrich.js [--all | --orcid XXXX-XXXX-XXXX-XXXX] [--max-queries N] [--force] [--dry-run] [--out DIR] [--re-extract] [--verbose]');
       process.exit(0);
     } else if (a.startsWith('--')) {
       console.error(`unknown flag: ${a}`);
@@ -75,6 +85,143 @@ function parseOrcidList(text) {
     .filter(Boolean);
 }
 
+// BRA-9.4.A: --re-extract 模式
+// 不打 ORCID API，直接从已保存的 orcid_profile_json 列重算派生列
+// （orcid_credit_name / orcid_external_ids_json / orcid_affiliations_json）。
+// 用于修 extract bug 之后用同一份 /person 响应重新出值，避免重打 13,820 个 ORCID。
+// 纯函数 reextractFromPersonJson 见 lib/orcid_enrich.js（方便单测）。
+
+async function reExtractFromSaved({ dataDir, dryRun, verbose, outDir }) {
+  const dbPath = path.join(dataDir, 'faculty.db');
+  if (!fs.existsSync(dbPath)) {
+    console.error(`faculty.db not found at ${dbPath}`);
+    process.exit(1);
+  }
+  const store = createStore({ dataDir, sqlite });
+  const log = makeLogger(verbose);
+  // 选出所有 orcid_profile_json 非空的行
+  const rows = store.db.prepare(`
+    SELECT id, orcid, email_orcid_id, orcid_last_modified, orcid_last_fetched,
+           orcid_profile_json, orcid_credit_name AS old_credit_name,
+           orcid_external_ids_json AS old_external_ids,
+           orcid_affiliations_json AS old_affiliations,
+           email_raw, email_source
+    FROM paper_authors
+    WHERE orcid_profile_json IS NOT NULL
+      AND orcid_profile_json != ''
+  `).all();
+  log(`[re-extract] selected ${rows.length} rows with saved orcid_profile_json`);
+  if (rows.length === 0) {
+    console.log(JSON.stringify({ mode: 're-extract', selected: 0, processed: 0, updated: 0, by_delta: {} }, null, 2));
+    store.close();
+    return;
+  }
+
+  // before/after 统计
+  const before = {
+    with_credit_name: rows.filter((r) => r.old_credit_name && r.old_credit_name.length >= 2).length,
+    with_external_ids: rows.filter((r) => {
+      if (!r.old_external_ids) return false;
+      try {
+        const arr = JSON.parse(r.old_external_ids);
+        return Array.isArray(arr) && arr.length > 0;
+      } catch (_) { return false; }
+    }).length,
+    with_affiliations: rows.filter((r) => {
+      if (!r.old_affiliations) return false;
+      try {
+        const arr = JSON.parse(r.old_affiliations);
+        return Array.isArray(arr) && arr.length > 0;
+      } catch (_) { return false; }
+    }).length,
+  };
+
+  const stats = {
+    mode: 're-extract',
+    selected: rows.length,
+    processed: 0,
+    updated: 0,
+    parse_errors: 0,
+    unchanged: 0,
+    delta_credit_name: 0,        // 新非空、旧空
+    delta_external_ids: 0,       // 新元素数 > 旧元素数
+    after: { with_credit_name: 0, with_external_ids: 0, with_affiliations: 0 },
+  };
+  const t0 = Date.now();
+  for (const row of rows) {
+    const extracted = reextractFromPersonJson(row.orcid_profile_json);
+    if (extracted.parseError) {
+      stats.parse_errors += 1;
+      continue;
+    }
+    const newCreditStr = extracted.creditName || null;
+    const newExtIds = extracted.externalIds;
+    const newAff = extracted.affiliations;
+    const newExtIdsStr = JSON.stringify(newExtIds);
+    const newAffStr = JSON.stringify(newAff);
+    // 与旧值对比：相等则 unchanged；否则 updated
+    const oldCredit = row.old_credit_name || null;
+    const oldExt = row.old_external_ids || null;
+    const oldAff = row.old_affiliations || null;
+    const creditChanged = oldCredit !== newCreditStr;
+    const extChanged = oldExt !== newExtIdsStr;
+    const affChanged = oldAff !== newAffStr;
+    const changed = creditChanged || extChanged || affChanged;
+    let oldExtLen = 0;
+    try { const a = JSON.parse(oldExt || '[]'); if (Array.isArray(a)) oldExtLen = a.length; } catch (_) { /* ignore */ }
+    if (changed) {
+      stats.updated += 1;
+      if (!oldCredit && newCreditStr) stats.delta_credit_name += 1;
+      if (newExtIds.length > oldExtLen) stats.delta_external_ids += (newExtIds.length - oldExtLen);
+    } else {
+      stats.unchanged += 1;
+    }
+    if (newCreditStr && newCreditStr.length >= 2) stats.after.with_credit_name += 1;
+    if (newExtIds.length > 0) stats.after.with_external_ids += 1;
+    if (newAff.length > 0) stats.after.with_affiliations += 1;
+    if (!dryRun && changed) {
+      store.recordOrcidProfile({
+        id: row.id,
+        // 保留原值（不重算 email_orcid_id / orcid_last_modified / orcid_last_fetched /
+        //   orcid_profile_json / email_raw / email_source，重提取只刷派生列）
+        emailOrcidId: row.email_orcid_id,
+        orcidCreditName: newCreditStr,
+        orcidExternalIdsJson: newExtIdsStr,
+        orcidAffiliationsJson: newAffStr,
+        orcidLastModified: row.orcid_last_modified,
+        orcidLastFetched: row.orcid_last_fetched,
+        orcidProfileJson: row.orcid_profile_json,
+        emailRaw: row.email_raw,
+        emailSource: row.email_source,
+      });
+    }
+    stats.processed += 1;
+  }
+  const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+  const summary = {
+    ...stats,
+    before,
+    delta_summary: {
+      credit_name: `${before.with_credit_name} → ${stats.after.with_credit_name} (+${stats.after.with_credit_name - before.with_credit_name})`,
+      external_ids_rows: `${before.with_external_ids} → ${stats.after.with_external_ids} (+${stats.after.with_external_ids - before.with_external_ids})`,
+      affiliations_rows: `${before.with_affiliations} → ${stats.after.with_affiliations} (+${stats.after.with_affiliations - before.with_affiliations})`,
+    },
+    duration_sec: Number(elapsed),
+    dry_run: dryRun,
+  };
+  console.log(JSON.stringify(summary, null, 2));
+  // 写一份 re-extract 报告到 outDir（默认 dataDir）
+  const reportDir = outDir || dataDir;
+  const reportPath = path.join(reportDir, 'orcid_reextract_summary.json');
+  try {
+    fs.writeFileSync(reportPath, JSON.stringify(summary, null, 2));
+    log(`[re-extract] wrote report to ${reportPath}`);
+  } catch (err) {
+    log(`[re-extract] failed to write report: ${err.message}`);
+  }
+  store.close();
+}
+
 async function main() {
   const opts = parseArgs(process.argv);
   const log = makeLogger(opts.verbose);
@@ -87,6 +234,17 @@ async function main() {
   if (!opts.dryRun && !fs.existsSync(dbPath)) {
     console.error(`faculty.db not found at ${dbPath}; run papers.js --all first, or use --dry-run`);
     process.exit(1);
+  }
+
+  // --re-extract 模式单独路径：跳过 API 查询
+  if (opts.reExtract) {
+    await reExtractFromSaved({
+      dataDir,
+      dryRun: opts.dryRun,
+      verbose: opts.verbose,
+      outDir: opts.out,
+    });
+    return;
   }
 
   // 审计日志：每条 ORCID API 调用都写一行（含 HTTP status / latency / response hash）

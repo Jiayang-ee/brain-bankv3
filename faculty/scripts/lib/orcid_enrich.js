@@ -20,11 +20,13 @@
 //   - api.extractEmailFromPerson(personJson)
 //                                     → [{ email, primary, visibility }] | []
 //   - api.extractExternalIds(personJson)
-//                                     → [{ type, value, relationship }] | []
+//                                     → [{ type, value, relationship, url }] | []
 //   - api.extractAffiliations(personJson)
 //                                     → [{ department, role, org, start, end, city, country }] | []
 //   - api.extractCreditName(personJson)
 //                                     → string | null
+//   - api.unwrapField(node)           → string | null
+//                                     （ORCID v3 /person 字段归一：裸字符串 OR {value: ...} 都吃）
 //   - api.fetchPerson(orcidId)        → { ok, status, person, lastModified, error, errorDetail }
 //   - api.processAuthor({ id, orcid, fetchImpl })
 //                                     → record-ready object { emailOrcidId, emailRaw, emailSource, orcidCreditName, ... }
@@ -98,18 +100,38 @@ function isValidEmailFormat(email) {
   return m[0] === email;
 }
 
+// ORCID /person 字段归一：兼容两种形态
+//   1. v3 /person 实际响应：字段就是裸字符串（"Wang Xiaoming"）
+//   2. 部分 fixture / 内部封装：{ "value": "Wang Xiaoming" }
+// 之前只读 .value，遇到裸字符串 → undefined → 整条 external-id 被丢 → capture rate 0%
+// （BRA-9.4 partial run 13,820 行 0% 命中即此 bug）。修后两种形态都正常出值。
+function unwrapField(node) {
+  if (node == null) return null;
+  if (typeof node === 'string') return node.trim() || null;
+  if (typeof node === 'object') {
+    if (node.value != null && typeof node.value === 'string') {
+      const s = node.value.trim();
+      if (s) return s;
+    }
+    // 兜底：其它对象结构（如 { "content": "..." }）直接 JSON 序列化也不靠谱，统一返回 null
+    return null;
+  }
+  return String(node);
+}
+
 // ORCID /person JSON 提取（保持容错：缺字段时返回空数组 / null）
 function extractCreditName(personJson) {
   if (!personJson || typeof personJson !== 'object') return null;
   const name = personJson.name;
   if (!name) return null;
   // 优先 given-names + family-name
-  const given = name['given-names'] && name['given-names'].value;
-  const family = name['family-name'] && name['family-name'].value;
+  const given = unwrapField(name['given-names']);
+  const family = unwrapField(name['family-name']);
   const composed = [given, family].filter(Boolean).join(' ').trim();
   if (composed) return composed;
   // 退化 credit-name
-  if (name['credit-name'] && name['credit-name'].value) return name['credit-name'].value;
+  const credit = unwrapField(name['credit-name']);
+  if (credit) return credit;
   return null;
 }
 
@@ -137,10 +159,10 @@ function extractExternalIds(personJson) {
   if (!eis) return [];
   const list = (Array.isArray(eis) ? eis : [eis]).filter(Boolean);
   return list.map((e) => {
-    const type = (e['external-id-type'] && e['external-id-type'].value) || null;
-    const value = (e['external-id-value'] && e['external-id-value'].value) || null;
-    const rel = (e['external-id-relationship'] && e['external-id-relationship'].value) || null;
-    const url = (e['external-id-url'] && e['external-id-url'].value) || null;
+    const type = unwrapField(e['external-id-type']);
+    const value = unwrapField(e['external-id-value']);
+    const rel = unwrapField(e['external-id-relationship']);
+    const url = unwrapField(e['external-id-url']);
     if (!type || !value) return null;
     return { type, value, relationship: rel, url };
   }).filter(Boolean);
@@ -201,6 +223,33 @@ function extractAffiliationsFromPerson(personJson) {
   }
 
   return out;
+}
+
+// BRA-9.4.A: 纯函数。给一份已存的 orcid_profile_json (string) 重算派生列。
+// 抽出来方便单测：可以脱离 DB 验证 bug 修复前后的 capture 行为差异。
+//   修复前：externalIds=[] / creditName=null（裸字符串 shape）
+//   修复后：externalIds=[{type, value, ...}] / creditName='Wang Xiaoming'
+function reextractFromPersonJson(profileJson) {
+  let person = null;
+  let parseError = null;
+  if (profileJson) {
+    try { person = JSON.parse(profileJson); }
+    catch (err) { parseError = err.message; }
+  }
+  if (!person) {
+    return {
+      parseError,
+      creditName: null,
+      externalIds: [],
+      affiliations: [],
+    };
+  }
+  return {
+    parseError: null,
+    creditName: extractCreditName(person),
+    externalIds: extractExternalIds(person),
+    affiliations: extractAffiliationsFromPerson(person),
+  };
 }
 
 function isoYearMonth(dateObj) {
@@ -418,6 +467,8 @@ function createOrcidEnrich({
     extractEmailsFromPerson,
     extractExternalIds,
     extractAffiliationsFromPerson,
+    unwrapField,
+    reextractFromPersonJson,
     fetchPerson,
     processAuthor,
     headers,
@@ -436,6 +487,8 @@ module.exports = {
   extractEmailsFromPerson,
   extractExternalIds,
   extractAffiliationsFromPerson,
+  unwrapField,
+  reextractFromPersonJson,
   ORCID_RE,
   DEFAULT_BASE,
   DEFAULT_USER_AGENT,

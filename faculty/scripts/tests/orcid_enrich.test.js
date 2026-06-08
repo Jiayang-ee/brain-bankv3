@@ -6,6 +6,10 @@
 //   3. isValidEmailFormat — 边界（黑名单 / ISSN-like / IP / 长度）
 //   4. processAuthor — mock fetch 测 200+email / 404 / 200 空 email / 429 退避
 //   5. store.recordOrcidProfile — 集成测试
+//
+// BRA-9.4.A 补充：ORCID v3 /person 真实响应的 name/external-id 字段是**裸字符串**（不是
+// {value: ...} 嵌套对象）。这一组单测覆盖该 shape；旧 extract 假设 .value，遇到裸字符串
+// 会把整条 external-id 丢掉，capture rate 跌到 0%（partial run 13,820 行 0% 即此 bug）。
 
 'use strict';
 
@@ -23,6 +27,8 @@ const {
   extractEmailsFromPerson,
   extractExternalIds,
   extractAffiliationsFromPerson,
+  unwrapField,
+  reextractFromPersonJson,
   DEFAULT_BASE,
 } = require('../lib/orcid_enrich.js');
 const { createStore } = require('../lib/storage.js');
@@ -162,6 +168,113 @@ test('extractExternalIds: 缺 type/value 的行被过滤', () => {
     { 'external-id-type': null, 'external-id-value': null },
   ] } };
   assert.equal(extractExternalIds(p).length, 0);
+});
+
+// ---------- BRA-9.4.A: ORCID v3 /person 真实响应（裸字符串字段） ----------
+//
+// ORCID 公共 API v3 实际返回的 /person 响应里，name 和 external-identifier 的子字段
+// 是裸字符串（"Wang" / "Scopus Author ID"），不是 {value: ...} 嵌套对象。
+// 旧的 extract 函数只读 .value，遇到裸字符串 → undefined → 整条记录被过滤，
+// 导致 partial run 13,820 行 0% 命中。下面这组测试覆盖真实 shape，修复前会失败。
+
+test('unwrapField: 裸字符串', () => {
+  assert.equal(unwrapField('Wang Xiaoming'), 'Wang Xiaoming');
+  assert.equal(unwrapField('  trimmed  '), 'trimmed');
+});
+
+test('unwrapField: {value: "..."} 嵌套对象', () => {
+  assert.equal(unwrapField({ value: 'Wang' }), 'Wang');
+  assert.equal(unwrapField({ value: '  spaced  ' }), 'spaced');
+  assert.equal(unwrapField({ value: '' }), null);
+  assert.equal(unwrapField({ value: '   ' }), null);
+});
+
+test('unwrapField: 边界 — null / undefined / 数字 / 空对象 / 未知 shape', () => {
+  assert.equal(unwrapField(null), null);
+  assert.equal(unwrapField(undefined), null);
+  assert.equal(unwrapField(123), '123');
+  assert.equal(unwrapField({}), null);
+  assert.equal(unwrapField({ content: 'x' }), null);
+  assert.equal(unwrapField({ value: 123 }), null);   // 非字符串 value 一律 null
+});
+
+test('extractCreditName: 真实 v3 /person shape（裸字符串 given/family）', () => {
+  // 真实 ORCID v3 /person 响应节选
+  const p = { name: { 'given-names': 'Wang', 'family-name': 'Xiaoming' } };
+  assert.equal(extractCreditName(p), 'Wang Xiaoming');
+});
+
+test('extractCreditName: 真实 v3 /person shape（裸 credit-name）', () => {
+  const p = { name: { 'credit-name': 'Wang XM' } };
+  assert.equal(extractCreditName(p), 'Wang XM');
+});
+
+test('extractCreditName: 混合形态 — given 是裸字符串、credit 是 {value:...}', () => {
+  // 极端 case：API 偶尔在某些字段混用两种形态；两者都应能消化
+  const p = { name: { 'given-names': 'Wang', 'family-name': { value: 'Xiaoming' } } };
+  assert.equal(extractCreditName(p), 'Wang Xiaoming');
+});
+
+test('extractExternalIds: 真实 v3 /person shape（裸字符串 type/value/url/relationship）', () => {
+  // ORCID 公共 API 真实响应节选（基于已查询的 13,820 行 /person 实际 shape）
+  const p = { 'external-identifiers': { 'external-identifier': [
+    { 'external-id-type': 'Scopus Author ID', 'external-id-value': '57196466208', 'external-id-relationship': 'self', 'external-id-url': { value: 'https://www.scopus.com/authid/detail.uri?authorId=57196466208' } },
+    { 'external-id-type': 'ResearcherID', 'external-id-value': 'A-1234-2020' },
+    { 'external-id-type': 'arXiv', 'external-id-value': 'xiaoming_wang_1' },
+  ] } };
+  const out = extractExternalIds(p);
+  assert.equal(out.length, 3, `expected 3 external-ids, got ${out.length} (bug: 旧 extract 在裸字符串时返回 [])`);
+  assert.equal(out[0].type, 'Scopus Author ID');
+  assert.equal(out[0].value, '57196466208');
+  assert.equal(out[0].relationship, 'self');
+  assert.equal(out[0].url, 'https://www.scopus.com/authid/detail.uri?authorId=57196466208');
+  assert.equal(out[1].type, 'ResearcherID');
+  assert.equal(out[1].value, 'A-1234-2020');
+  assert.equal(out[2].type, 'arXiv');
+  assert.equal(out[2].value, 'xiaoming_wang_1');
+});
+
+test('extractExternalIds: 缺 type/value 的行被过滤（裸字符串形态）', () => {
+  const p = { 'external-identifiers': { 'external-identifier': [
+    { 'external-id-type': 'Scopus', 'external-id-value': '' },
+    { 'external-id-type': null, 'external-id-value': null },
+  ] } };
+  assert.equal(extractExternalIds(p).length, 0);
+});
+
+test('extractExternalIds: 单条 external-identifier（非数组）兼容', () => {
+  // 真实响应里某些 profile 只有一个 external-identifier 时，ORCID 返回的是对象而非数组
+  const p = { 'external-identifiers': { 'external-identifier':
+    { 'external-id-type': 'Scopus Author ID', 'external-id-value': '7001234567' } } };
+  const out = extractExternalIds(p);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].type, 'Scopus Author ID');
+  assert.equal(out[0].value, '7001234567');
+});
+
+test('processAuthor: 真实 v3 /person shape — 端到端 credit_name + external_ids', async () => {
+  // 真实 v3 /person 响应节选（裸字符串子字段）
+  const fetchImpl = mockFetch([{
+    status: 200,
+    body: {
+      name: { 'given-names': 'Wang', 'family-name': 'Xiaoming' },
+      'external-identifiers': { 'external-identifier': [
+        { 'external-id-type': 'Scopus Author ID', 'external-id-value': '57196466208' },
+        { 'external-id-type': 'ResearcherID', 'external-id-value': 'A-1234-2020' },
+      ] },
+      emails: { email: [] },
+    },
+  }]);
+  const api = createOrcidEnrich({ fetchImpl, rateLimitMs: 0, maxRetries: 0 });
+  const r = await api.processAuthor({ id: 'pa-real', orcid: '0000-0001-2345-6789' });
+  assert.equal(r._ok, true);
+  // 修复前：orcidCreditName = null（旧 extract 看到裸字符串读不到 .value）
+  assert.equal(r.orcidCreditName, 'Wang Xiaoming');
+  // 修复前：orcidExternalIdsJson = "[]"（旧 extract 整条丢光）
+  const extIds = JSON.parse(r.orcidExternalIdsJson);
+  assert.equal(extIds.length, 2, `expected 2 external-ids, got ${extIds.length} (bug: 旧 extract 在裸字符串时返回 [])`);
+  assert.equal(extIds[0].type, 'Scopus Author ID');
+  assert.equal(extIds[1].type, 'ResearcherID');
 });
 
 // ---------- extractAffiliationsFromPerson ----------
@@ -334,6 +447,71 @@ test('processAuthor: invalid orcid — 直接返回错误，不发请求', async
   assert.equal(r._ok, false);
   assert.equal(r._error, 'invalid_orcid');
   assert.equal(calls, 0, 'invalid orcid 不应发请求');
+});
+
+// ---------- BRA-9.4.A: reextractFromPersonJson 纯函数 ----------
+//
+// 这是 --re-extract CLI 模式的核心纯函数。给一份已存的 orcid_profile_json
+// （即 ORCID v3 /person 原始响应），重算派生列（credit_name / external_ids /
+// affiliations）。修复 extract bug 后用同一份 /person 响应重新出值，可避免重打
+// ORCID API。
+
+test('reextractFromPersonJson: 真实 v3 /person shape — 解析出非零派生列', () => {
+  const profile = JSON.stringify({
+    name: { 'given-names': 'Wang', 'family-name': 'Xiaoming' },
+    'external-identifiers': { 'external-identifier': [
+      { 'external-id-type': 'Scopus Author ID', 'external-id-value': '57196466208' },
+      { 'external-id-type': 'ResearcherID', 'external-id-value': 'A-1234-2020' },
+    ] },
+    emails: { email: [] },
+  });
+  const out = reextractFromPersonJson(profile);
+  assert.equal(out.parseError, null);
+  assert.equal(out.creditName, 'Wang Xiaoming');
+  assert.equal(out.externalIds.length, 2);
+  assert.equal(out.externalIds[0].type, 'Scopus Author ID');
+});
+
+test('reextractFromPersonJson: 无 external-identifier 的 profile — 返回空数组', () => {
+  const profile = JSON.stringify({
+    name: { 'given-names': 'Wang', 'family-name': 'Xiaoming' },
+  });
+  const out = reextractFromPersonJson(profile);
+  assert.equal(out.creditName, 'Wang Xiaoming');
+  assert.deepEqual(out.externalIds, []);
+  assert.deepEqual(out.affiliations, []);
+});
+
+test('reextractFromPersonJson: 空字符串 / null / 非法 JSON — 优雅降级', () => {
+  for (const v of [null, undefined, '', 'not-json{']) {
+    const out = reextractFromPersonJson(v);
+    assert.equal(out.creditName, null);
+    assert.deepEqual(out.externalIds, []);
+    assert.deepEqual(out.affiliations, []);
+    if (typeof v === 'string' && v !== '') {
+      assert.ok(out.parseError, 'invalid JSON 应有 parseError');
+    }
+  }
+});
+
+test('reextractFromPersonJson: 对比修复前/后 capture 行为（旧 extract 会丢光）', () => {
+  // 真实 ORCID v3 /person shape（裸字符串子字段）
+  const profile = JSON.stringify({
+    name: { 'given-names': 'Wang', 'family-name': 'Xiaoming' },
+    'external-identifiers': { 'external-identifier': [
+      { 'external-id-type': 'Scopus Author ID', 'external-id-value': '57196466208' },
+    ] },
+  });
+  const out = reextractFromPersonJson(profile);
+  // 修复前（基于 .value 的旧 extract）在这份 profile 上：
+  //   creditName = null（旧 extract 给裸字符串赋值 .value → undefined → 整条丢）
+  //   externalIds = []（同上）
+  // 修复后（unwrapField 兼容裸字符串 + {value:...}）：
+  //   creditName = 'Wang Xiaoming'
+  //   externalIds.length === 1
+  assert.equal(out.creditName, 'Wang Xiaoming', 'credit_name 修复后应非空');
+  assert.ok(out.externalIds.length > 0, 'external_ids 修复后应至少 1 条');
+  assert.equal(out.externalIds[0].type, 'Scopus Author ID');
 });
 
 // ---------- 集成测试：store.recordOrcidProfile ----------

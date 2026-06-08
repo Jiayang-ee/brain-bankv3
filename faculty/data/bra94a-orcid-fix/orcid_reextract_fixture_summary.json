@@ -1,0 +1,27 @@
+{
+  "mode": "re-extract",
+  "selected": 100,
+  "processed": 100,
+  "updated": 100,
+  "parse_errors": 0,
+  "unchanged": 0,
+  "delta_credit_name": 95,
+  "delta_external_ids": 150,
+  "after": {
+    "with_credit_name": 95,
+    "with_external_ids": 50,
+    "with_affiliations": 0
+  },
+  "before": {
+    "with_credit_name": 0,
+    "with_external_ids": 0,
+    "with_affiliations": 0
+  },
+  "delta_summary": {
+    "credit_name": "0 → 95 (+95)",
+    "external_ids_rows": "0 → 50 (+50)",
+    "affiliations_rows": "0 → 0 (+0)"
+  },
+  "duration_sec": 0,
+  "dry_run": false
+}

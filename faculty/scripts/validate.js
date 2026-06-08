@@ -354,27 +354,50 @@ function fail(msg) {
     //   covered  = orcid_affiliations_json IS NOT NULL 的行（拿到 affiliations profile 字段）
     //   queried  = orcid_last_fetched IS NOT NULL 的行（已查询过的作者）
     //   门槛 50%：低于则 fail（与 schema v1.5 验收标准对齐）
+    //
+    // BRA-9.4.A 收紧（已知漏洞：旧 KPI 把 "orcid_external_ids_json='[]'" 也算 covered
+    //   — 之前因 extract 函数只读 .value 把所有 external-id 丢了，13,820 行 0% 命中
+    //   但 KPI 仍报 100%；现在拆成两个口径，输出中明确区分：
+    //     1. profile/raw 覆盖率：orcid_affiliations_json 非空（含 "[]"，因为 /person
+    //        端点不返回 employments/educations 字段，这是事实而非 bug）
+    //     2. useful-derived 覆盖率：orcid_external_ids_json 真的有内容（> 0 元素）
+    //        且 orcid_credit_name 非空（>= 2 字符，避免 0/NULL 假阳性）
+    //   useful-derived 是真正的「数据捕获」KPI；后续 BRA-9.4 全量补跑以这一项为准。
     const orcidProfileCov = db.prepare(`
       SELECT
         SUM(CASE WHEN orcid_last_fetched IS NOT NULL THEN 1 ELSE 0 END) AS queried,
         SUM(CASE WHEN orcid_last_fetched IS NOT NULL
                   AND orcid_affiliations_json IS NOT NULL
-                  AND orcid_affiliations_json != '' THEN 1 ELSE 0 END) AS covered
+                  AND orcid_affiliations_json != '' THEN 1 ELSE 0 END) AS covered_raw,
+        SUM(CASE WHEN orcid_last_fetched IS NOT NULL
+                  AND orcid_external_ids_json IS NOT NULL
+                  AND orcid_external_ids_json != ''
+                  AND json_array_length(orcid_external_ids_json) > 0
+                  AND orcid_credit_name IS NOT NULL
+                  AND length(orcid_credit_name) >= 2
+                THEN 1 ELSE 0 END) AS covered_derived
       FROM paper_authors
       WHERE chinese_name_probability >= 0.4
         AND (is_first_author = 1 OR is_corresponding = 1)
         AND orcid IS NOT NULL AND orcid <> ''
     `).get();
     const queried = orcidProfileCov.queried || 0;
-    const covered = orcidProfileCov.covered || 0;
+    const coveredRaw = orcidProfileCov.covered_raw || 0;
+    const coveredDerived = orcidProfileCov.covered_derived || 0;
     if (queried > 0) {
-      const pct = ((covered / queried) * 100).toFixed(1);
-      console.log(`- ORCID profile 覆盖率: ${covered}/${queried} = ${pct}% (门槛 50%)`);
-      if (covered / queried < 0.5) {
-        fail(`ORCID profile 覆盖率 ${pct}% < 50% 门槛`);
+      const pctRaw = ((coveredRaw / queried) * 100).toFixed(1);
+      const pctDerived = ((coveredDerived / queried) * 100).toFixed(1);
+      console.log(`- ORCID profile 覆盖率: ${coveredRaw}/${queried} = ${pctRaw}% (门槛 50%, 旧口径：含空 affiliations 数组)`);
+      console.log(`- ORCID useful-derived 覆盖率: ${coveredDerived}/${queried} = ${pctDerived}% (门槛 30%, 新口径：external_ids 真的解析出元素 AND credit_name >= 2 字符)`);
+      if (coveredRaw / queried < 0.5) {
+        fail(`ORCID profile 覆盖率 ${pctRaw}% < 50% 门槛`);
+      }
+      if (coveredDerived / queried < 0.3) {
+        fail(`ORCID useful-derived 覆盖率 ${pctDerived}% < 30% 门槛 (空数组 / 0-length credit_name 不再算覆盖)`);
       }
     } else {
       console.log('- ORCID profile 覆盖率: (尚无 ORCID 查询行; 跑 orcid_enrich.js 后再校验)');
+      console.log('- ORCID useful-derived 覆盖率: (尚无 ORCID 查询行; 跑 orcid_enrich.js 后再校验)');
     }
 
     // email_orcid_id 格式校验：必须是 0000-0000-0000-0000 或末位 X
