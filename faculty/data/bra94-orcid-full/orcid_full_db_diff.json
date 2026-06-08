@@ -1,0 +1,36 @@
+{
+  "source_db": "bra-9.1-real-2026-06-06",
+  "target_candidates": 41943,
+  "candidates_queried": 13820,
+  "candidates_remaining": 29028,
+  "candidates_with_email_orcid": 1520,
+  "by_status": {
+    "0": 1,
+    "200": 13857,
+    "301": 12,
+    "409": 2
+  },
+  "with_affiliations_json": 13820,
+  "with_external_ids_json": 13820,
+  "with_credit_name": 13794,
+  "with_profile_json": 13820,
+  "kpi_coverage": {
+    "covered": 13820,
+    "queried": 13820,
+    "threshold_pct": 50,
+    "passes": true,
+    "pct": 100
+  },
+  "data_quality": {
+    "with_nonempty_affiliations": 0,
+    "with_nonempty_external_ids": 0,
+    "with_profile_json": 13820,
+    "notes": [
+      "orcid_profile_json column contains the full /person response (incl. external-identifiers, emails, researcher-urls, other-names)",
+      "orcid_affiliations_json column is always [] — /person endpoint does not return employments/educations (need separate /employments endpoint, NOT queried)",
+      "orcid_external_ids_json column is always [] — extractExternalIds() in lib/orcid_enrich.js looks for {value: ...} format but ORCID returns plain strings for external-id-type / external-id-value",
+      "orcid_credit_name column is always NULL — extractCreditName() has the same {value:...} mismatch on given-names / family-name",
+      "See SUMMARY.md section \"Critical finding: extract functions mismatch ORCID v3 /person response shape\" for details"
+    ]
+  }
+}

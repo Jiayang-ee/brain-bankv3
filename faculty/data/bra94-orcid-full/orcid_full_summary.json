@@ -1,0 +1,92 @@
+{
+  "source_db_release": "bra-9.1-real-2026-06-06",
+  "source_db_sha256_expected": "c96e03e571fff8e6185b9e7e7bf21d7e14b76d8d26a5d71c9f75ba05b5886c0e",
+  "source_db_size_bytes": 396926976,
+  "schema_version": "v1.5 (BRA-9.2 + BRA-9.3)",
+  "run_started": "2026-06-08T04:19:17.141Z",
+  "run_finished": "2026-06-08T05:40:24.571Z",
+  "duration_sec": 4867.4,
+  "target_total": 41943,
+  "selected_for_query": 13872,
+  "queried": 13872,
+  "processed": 13872,
+  "ok": 13857,
+  "not_found_404": 0,
+  "failures": 15,
+  "failures_pct": 0.11,
+  "with_orcid_email": 1526,
+  "email_rate_pct": 11,
+  "rate_per_sec": 2.85,
+  "by_status": {
+    "0": {
+      "n": 1,
+      "ok": 0,
+      "has_email": 0,
+      "errors": 1,
+      "error_samples": [
+        {
+          "orcid": "https://orcid.org/",
+          "error": "invalid_orcid",
+          "detail": "https://orcid.org/"
+        }
+      ]
+    },
+    "200": {
+      "n": 13857,
+      "ok": 13857,
+      "has_email": 1526,
+      "errors": 0,
+      "error_samples": []
+    },
+    "301": {
+      "n": 12,
+      "ok": 0,
+      "has_email": 0,
+      "errors": 12,
+      "error_samples": [
+        {
+          "orcid": "0000-0001-5126-9788",
+          "error": "http_4xx",
+          "detail": "{\"response-code\":301,\"developer-message\":\"301 Moved Permanently: This account is deprecated. Please "
+        },
+        {
+          "orcid": "0000-0001-5126-9788",
+          "error": "http_4xx",
+          "detail": "{\"response-code\":301,\"developer-message\":\"301 Moved Permanently: This account is deprecated. Please "
+        },
+        {
+          "orcid": "0000-0001-5126-9788",
+          "error": "http_4xx",
+          "detail": "{\"response-code\":301,\"developer-message\":\"301 Moved Permanently: This account is deprecated. Please "
+        }
+      ]
+    },
+    "409": {
+      "n": 2,
+      "ok": 0,
+      "has_email": 0,
+      "errors": 2,
+      "error_samples": [
+        {
+          "orcid": "0000-0001-6970-5162",
+          "error": "http_4xx",
+          "detail": "{\"response-code\":409,\"developer-message\":\"409 Conflict: The ORCID record is deactivated and cannot b"
+        },
+        {
+          "orcid": "0000-0001-9937-3058",
+          "error": "http_4xx",
+          "detail": "{\"response-code\":409,\"developer-message\":\"409 Conflict: The ORCID record is deactivated and cannot b"
+        }
+      ]
+    }
+  },
+  "rate_limit": "5 req/sec target; ORCID anonymous public API 6 req/sec cap",
+  "orcid_endpoint": "https://pub.orcid.org/v3.0/{id}/person",
+  "user_agent": "brain-bank/0.1 (mailto:agent@multica.ai)",
+  "run_status": "PARTIAL — stopped via SIGINT at 33% completion; full run takes ~4 hours; next agent run can resume (orcid_last_fetched window filter skips already-queried)",
+  "candidates_total_in_db": 41943,
+  "candidates_remaining": 28071,
+  "kpi_formal_coverage_pct": 100,
+  "kpi_real_coverage_pct": 0,
+  "data_quality_caveat": "profile JSON column has full /person response (incl. external-identifiers as plain strings) but extractExternalIds is buggy (looks for {value:...} format). /person does not include employments/educations — those require separate /employments endpoint (NOT queried)."
+}

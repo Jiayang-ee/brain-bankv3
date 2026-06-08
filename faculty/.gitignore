@@ -25,3 +25,12 @@ data/real-*.bak
 .idea/
 .vscode/
 *.swp
+
+# BRA-9.4 ORCID 全量跑数据（持久化走 GitHub Release，详见 RELEASE_NOTES.md）
+data/bra94-orcid-full/orcid_query_log.jsonl
+data/bra94-orcid-full/orcid_full_query_log.jsonl
+data/bra94-orcid-full/bra94-orcid-queries.txt
+data/bra94-orcid-full/faculty.db
+data/bra94-orcid-full/faculty.db-journal
+data/bra94-orcid-full/faculty.db-wal
+data/bra94-orcid-full/faculty.db-shm

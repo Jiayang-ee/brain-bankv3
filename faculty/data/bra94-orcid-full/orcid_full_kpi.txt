@@ -1,0 +1,22 @@
+[FAIL] department_summary covers only 0/50 schools; re-run with --all to seed
+- candidates: no duplicate (source_kind, source_url)
+- crawl_log status distribution: {"success":40}
+- headshot status distribution: (no personal_page candidates have been processed; run photos.js)
+- totals: {"candidates":0,"chinese_likely":0,"departments":0,"schools":0,"crawl_events":40}
+[FAIL] schools covered = 0/50
+- BRA-9 journals table: 51 rows
+  status: {"success":40,"api_unsupported":11}
+  papers: 95960 total, 95960 in 2021-2026 range
+  paper_authors: 554900 total, 170567 chinese_likely, 68168 target_candidates
+  emails: 13597 with email_raw (2.45% of 554900 authors)
+  email coverage: 2.45% (>= 1% OK)
+  email_source distribution: {"openalex_regex":12077,"orcid_public_api":1520}
+- ORCID enrich: 13820 with email_orcid_id, 13820 fetched, 1520 email_source=orcid_public_api
+- ORCID profile 覆盖率: 13820/13820 = 100.0% (门槛 50%)
+  email_source / email_orcid_id consistency: OK (1520 rows)
+  orcid_external_ids_json: 13820 rows, all valid JSON
+  orcid_affiliations_json: 13820 rows, all valid JSON
+  orcid_profile_json: 13820 rows, all valid JSON
+- orcid_query_log.jsonl: 13872 rows valid
+
+VALIDATION FAILED
