@@ -186,6 +186,9 @@ CREATE TABLE IF NOT EXISTS paper_authors (
   orcid_last_modified       TEXT,                -- ORCID profile last update（ISO8601）
   orcid_last_fetched        TEXT,                -- 我们打 ORCID API 的时间（audit / 增量重跑）
   orcid_profile_json        TEXT,                -- 完整 /person 响应（冷字段兜底；平均 ~1KB/作者）
+  -- BRA-10.1 人工审核字段（前端 BRA-10 查看器写回）
+  review_status             TEXT    NOT NULL DEFAULT 'pending',  -- pending | confirmed | excluded | focus
+  review_notes              TEXT,                -- 审核备注
   first_seen_at             TEXT    NOT NULL,
   last_seen_at              TEXT    NOT NULL,
   FOREIGN KEY (paper_id) REFERENCES papers(id) ON DELETE CASCADE
@@ -198,6 +201,8 @@ CREATE INDEX IF NOT EXISTS idx_pa_corr     ON paper_authors(is_corresponding);
 CREATE INDEX IF NOT EXISTS idx_pa_email_source ON paper_authors(email_source);
 -- BRA-9.2: 增量重跑友好 — "最近被查过"的 ORCID 跳过
 CREATE INDEX IF NOT EXISTS idx_pa_orcid_fetched ON paper_authors(orcid, orcid_last_fetched);
+-- 注：idx_pa_review 在 ensureColumn 块里 try/catch 幂等创建（避免旧 DB 中 review_status
+--     尚未补齐时直接执行 CREATE INDEX 报错）
 `;
 
 function nowIso() { return new Date().toISOString(); }
@@ -243,6 +248,11 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
   ensureColumn(db, 'paper_authors', 'orcid_last_fetched', 'TEXT');
   ensureColumn(db, 'paper_authors', 'orcid_profile_json', 'TEXT');
   try { db.exec(`CREATE INDEX IF NOT EXISTS idx_pa_orcid_fetched ON paper_authors(orcid, orcid_last_fetched)`); } catch (_) { /* ignore */ }
+  // 幂等迁移：BRA-10.1 给 paper_authors 加 review_status / review_notes 列
+  // （SQLite ADD COLUMN 不可重复，因此用 ensureColumn 跳过已存在的列）
+  ensureColumn(db, 'paper_authors', 'review_status', "TEXT NOT NULL DEFAULT 'pending'");
+  ensureColumn(db, 'paper_authors', 'review_notes', 'TEXT');
+  try { db.exec(`CREATE INDEX IF NOT EXISTS idx_pa_review ON paper_authors(review_status)`); } catch (_) { /* ignore */ }
 
   const candidatesJsonlPath = path.join(dataDir, 'candidates.jsonl');
   const crawlLogJsonlPath = path.join(dataDir, 'crawl_log.jsonl');
@@ -559,6 +569,7 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
       chinese_name_probability, chinese_name_reasons, chinese_name_negatives,
       is_target_candidate,
       email_raw, email_source, email_match_context,
+      review_status, review_notes,
       first_seen_at, last_seen_at
     ) VALUES (
       @id, @paper_id, @author_name, @author_position,
@@ -567,6 +578,7 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
       @chinese_name_probability, @chinese_name_reasons, @chinese_name_negatives,
       @is_target_candidate,
       @email_raw, @email_source, @email_match_context,
+      @review_status, @review_notes,
       @first_seen_at, @last_seen_at
     )
     ON CONFLICT(id) DO UPDATE SET
@@ -586,6 +598,7 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
       email_source = excluded.email_source,
       email_match_context = excluded.email_match_context,
       last_seen_at = excluded.last_seen_at
+      -- 注意：review_status / review_notes 不在 ON CONFLICT 更新集里 — 审核员填过的值不能被重抓覆盖
   `);
 
   // BRA-9.2: ORCID enrich 写回（per-author，按 id 定位）
@@ -604,6 +617,20 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
       email_source            = CASE WHEN email_raw IS NULL THEN @email_source ELSE email_source END,
       last_seen_at            = @last_seen_at
     WHERE id = @id
+  `);
+
+  // BRA-10.1: 写回论文作者的人工审核状态/备注（仅修改 review_status / review_notes，其余字段不变）
+  const updatePaperAuthorReviewStmt = db.prepare(`
+    UPDATE paper_authors SET
+      review_status = @review_status,
+      review_notes  = @review_notes,
+      last_seen_at  = @last_seen_at
+    WHERE id = @id
+  `);
+
+  // BRA-10.1: 按 id 读回单条 paper_author（含审核字段）
+  const selectPaperAuthorById = db.prepare(`
+    SELECT * FROM paper_authors WHERE id = @id
   `);
 
   // BRA-9.2: 选出待 ORCID lookup 的 paper_authors 行
@@ -744,12 +771,34 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
       email_match_context: entry.emailMatchContext
         ? String(entry.emailMatchContext).slice(0, 4096)
         : null,
+      // BRA-10.1 审核字段：首次写入取 entry 值（默认 'pending' / null）；
+      // 冲突时由 ON CONFLICT 子句不更新这两个字段，保留人工审核结果
+      review_status: entry.reviewStatus || 'pending',
+      review_notes: entry.reviewNotes ?? null,
       first_seen_at: entry.firstSeenAt || nowIso(),
       last_seen_at: entry.lastSeenAt || nowIso(),
     };
     insertPaperAuthor.run(row);
     writePaperAuthors(`${JSON.stringify(row)}\n`);
     return row;
+  }
+
+  // BRA-10.1: 写回论文作者的人工审核状态/备注
+  // 仅修改 review_status / review_notes；其余字段保持原值
+  function updatePaperAuthorReview({ id, reviewStatus, reviewNotes }) {
+    if (!id) throw new Error('updatePaperAuthorReview: id required');
+    const info = updatePaperAuthorReviewStmt.run({
+      id,
+      review_status: reviewStatus || 'pending',
+      review_notes: reviewNotes ?? null,
+      last_seen_at: nowIso(),
+    });
+    return { changes: info.changes };
+  }
+
+  // BRA-10.1: 按 id 读回单条 paper_author（含审核字段），便于前端展示与回显
+  function getPaperAuthor(id) {
+    return selectPaperAuthorById.get({ id }) || null;
   }
 
   // ---- BRA-9.2: ORCID enrich helpers ----
@@ -826,6 +875,8 @@ function createStore({ dataDir, sqlite, logger = console } = {}) {
     recordJournal,
     recordPaper,
     recordPaperAuthor,
+    updatePaperAuthorReview,
+    getPaperAuthor,
     recordOrcidProfile,
     selectOrcidLookupRows,
     getOrcidLookupStats,

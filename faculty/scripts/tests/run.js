@@ -26,6 +26,7 @@ const testFiles = [
   './orcid_enrich.test.js',
   './crossref_email.test.js',
   './openaire_email.test.js',
+  './viewer_api.test.js',
 ];
 
 let totalRun = 0;
