@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>人才库 · 本地查看器 (BRA-10)</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-mark">人才库</span>
+      <span class="brand-sub">本地人工复核 · BRA-10</span>
+    </div>
+    <div class="stats" id="stats">
+      <span class="stat" id="stat-faculty">教师 0 / 华人 0</span>
+      <span class="stat" id="stat-paper">论文 0 / 华人 0</span>
+      <span class="stat schema-warning" id="stat-warn" hidden>论文审核字段缺失（等待 BRA-23）</span>
+    </div>
+    <div class="header-actions">
+      <button type="button" class="btn ghost" id="btn-refresh" title="刷新">↻</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- 左侧：筛选 + 列表 -->
+    <section class="pane pane-list">
+      <div class="filters">
+        <div class="filter-row source-tabs">
+          <button type="button" class="tab active" data-source="faculty">教师 (personal_page)</button>
+          <button type="button" class="tab" data-source="paper">论文作者 (target_candidate)</button>
+        </div>
+
+        <div class="filter-row">
+          <label class="field grow">
+            <span>关键词</span>
+            <input id="f-q" type="search" placeholder="姓名 / 职位 / 邮箱 / 机构">
+          </label>
+        </div>
+
+        <div class="filter-row two">
+          <label class="field">
+            <span>华人概率 ≥</span>
+            <input id="f-min-chs" type="number" min="0" max="1" step="0.05" value="0">
+          </label>
+          <label class="field">
+            <span>排序</span>
+            <select id="f-sort">
+              <option value="chs_desc">华人概率 ↓</option>
+              <option value="name_asc">姓名 A→Z</option>
+              <option value="recent_desc">最近更新 ↓</option>
+            </select>
+          </label>
+        </div>
+
+        <details class="filter-extra" open>
+          <summary>更多筛选</summary>
+          <div class="filter-row two">
+            <label class="field">
+              <span>学校 (multi)</span>
+              <select id="f-school" multiple size="5"></select>
+            </label>
+            <label class="field">
+              <span>院系 (multi)</span>
+              <select id="f-dept" multiple size="5"></select>
+            </label>
+          </div>
+          <div class="filter-row two">
+            <label class="field">
+              <span>学科类别 (multi)</span>
+              <select id="f-category" multiple size="4"></select>
+            </label>
+            <label class="field">
+              <span>审核状态 (multi)</span>
+              <select id="f-status" multiple size="4">
+                <option value="pending">待审核 pending</option>
+                <option value="confirmed">确认相关 confirmed</option>
+                <option value="excluded">排除 excluded</option>
+                <option value="focus">重点关注 focus</option>
+              </select>
+            </label>
+          </div>
+        </details>
+
+        <div class="filter-row actions">
+          <button type="button" class="btn primary" id="btn-apply">应用筛选</button>
+          <button type="button" class="btn ghost" id="btn-reset">重置</button>
+        </div>
+      </div>
+
+      <div class="list-meta">
+        <span id="list-count">—</span>
+        <span class="list-hint" id="list-hint"></span>
+      </div>
+
+      <div class="list" id="list" tabindex="0">
+        <div class="empty" id="list-empty" hidden>没有匹配的候选人</div>
+      </div>
+
+      <div class="pager">
+        <button type="button" class="btn ghost" id="btn-prev">←</button>
+        <span id="page-info">—</span>
+        <button type="button" class="btn ghost" id="btn-next">→</button>
+      </div>
+    </section>
+
+    <!-- 右侧：详情 -->
+    <aside class="pane pane-detail" id="detail">
+      <div class="detail-empty" id="detail-empty">
+        <p>选择左侧任一候选人查看详情</p>
+      </div>
+      <div class="detail" id="detail-content" hidden>
+        <header class="detail-header">
+          <div class="detail-name">
+            <h2 id="d-name">—</h2>
+            <span class="source-badge" id="d-source">faculty</span>
+            <span class="chs-pill" id="d-chs">0%</span>
+          </div>
+          <div class="detail-sub" id="d-sub">—</div>
+        </header>
+
+        <section class="detail-section">
+          <h3>学校 / 院系</h3>
+          <dl id="d-school">
+            <dt>学校</dt><dd id="d-school-name">—</dd>
+            <dt>院系</dt><dd id="d-dept-name">—</dd>
+            <dt>类别</dt><dd id="d-category">—</dd>
+          </dl>
+        </section>
+
+        <section class="detail-section" id="d-paper-section" hidden>
+          <h3>论文证据</h3>
+          <dl>
+            <dt>标题</dt><dd id="d-paper-title">—</dd>
+            <dt>期刊</dt><dd id="d-paper-journal">—</dd>
+            <dt>发表年</dt><dd id="d-paper-year">—</dd>
+            <dt>作者位序</dt><dd id="d-paper-pos">—</dd>
+            <dt>机构</dt><dd id="d-paper-aff">—</dd>
+            <dt>DOI</dt><dd id="d-paper-doi">—</dd>
+          </dl>
+        </section>
+
+        <section class="detail-section">
+          <h3>证据 / 链接</h3>
+          <dl>
+            <dt>原始 URL</dt><dd id="d-source-url"><a href="#" target="_blank" rel="noopener">—</a></dd>
+            <dt id="d-local-label">本地 HTML</dt><dd id="d-local">—</dd>
+            <dt>头像 (本地)</dt><dd id="d-photo">—</dd>
+            <dt>邮箱</dt><dd id="d-email">—</dd>
+          </dl>
+        </section>
+
+        <section class="detail-section">
+          <h3>疑似华人初筛</h3>
+          <div class="reasons" id="d-reasons">—</div>
+        </section>
+
+        <section class="detail-section review">
+          <h3>人工审核</h3>
+          <label class="field">
+            <span>审核状态</span>
+            <select id="d-status">
+              <option value="pending">待审核 pending</option>
+              <option value="confirmed">确认相关 confirmed</option>
+              <option value="excluded">排除 excluded</option>
+              <option value="focus">重点关注 focus</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>备注</span>
+            <textarea id="d-notes" rows="3" placeholder="备注（可空，保存到 SQLite）"></textarea>
+          </label>
+          <div class="detail-actions">
+            <button type="button" class="btn primary" id="btn-save">保存到 SQLite</button>
+            <span class="save-status" id="save-status"></span>
+          </div>
+        </section>
+      </div>
+    </aside>
+  </main>
+
+  <div class="toast" id="toast" hidden></div>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

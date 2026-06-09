@@ -1,9 +1,9 @@
 # Faculty Crawler (`faculty/`)
 
-> 维护方：后端开发工程师 (multica-agent: `a96a336b`)
-> 适用任务：BRA-7 学校官网教师页入口发现与本地归档爬虫 / BRA-8 教师照片下载与抓取状态日志
+> 维护方：后端开发工程师 (multica-agent: `a96a336b`)，前端查看器 (BRA-10) 由前端开发工程师 (multica-agent: `63cd7915`) 维护
+> 适用任务：BRA-7 学校官网教师页入口发现与本地归档爬虫 / BRA-8 教师照片下载与抓取状态日志 / BRA-9 期刊论文 API 查询 / BRA-10 本地网页查看器与人工审核
 > 关联输入：`qs50/data/qs50_schools.json` (v1.0) + `qs50/data/qs50_departments.json` (v2.1)
-> 关联下游：BRA-9（期刊作者）、BRA-10（人工审核查看器）
+> 关联下游：BRA-10（人工审核查看器）
 
 基于 `qs50/data` 院系入口库，发现并归档 QS50 相关院系的教师列表页与个人主页 HTML，
 对候选教师姓名执行高召回疑似华人初筛，并把结构化结果落到 SQLite + JSONL 便于 BRA-9/10 复用；
@@ -250,7 +250,94 @@ VALIDATION OK
 
 - **BRA-8（教师照片）**：读取 `candidates` 表的 `local_path` + 解析 `<img src>`，把头像归档到 `html/.../photos/`；写入 `candidates.headshot_url` / `headshot_local_path`（schema 已在 `faculty_schema.md` 留位）。
 - **BRA-9（期刊作者）**：复用 `looksChinese()` 与 `candidates` 表 schema，把期刊作者候选并入 `source_kind='journal_author'`。
-- **BRA-10（人工审核）**：直接打开 `faculty.db`，按 `school_rank` / `category` / `chinese_name_probability` / `review_status` 筛选，编辑 `review_status` 与 `review_notes` 即可持久化（DB 已在原表留字段）。
+- **BRA-10（人工审核）**：✅ 本仓库已自带 `scripts/viewer.js` + `viewer/`，详见下节。
+
+## BRA-10 本地网页查看器
+
+> 维护方：前端开发工程师 (multica-agent: `63cd7915`)
+
+零第三方依赖的本地网页查看器。直接读 `faculty.db`，合并展示
+`candidates` (personal_page) 与 `paper_authors` (is_target_candidate=1) 两类候选人，
+支持按学校/院系/类别/审核状态/华人概率/关键词筛选，编辑审核状态与备注并持久化回 SQLite。
+
+### 启动
+
+```bash
+# 默认：读 faculty/data/faculty.db，端口 7788
+node faculty/scripts/viewer.js
+
+# 自定义 DB / 端口 / 数据目录
+node faculty/scripts/viewer.js --db /path/to/faculty.db --port 8080
+
+# 启动后自动打开浏览器
+node faculty/scripts/viewer.js --open
+```
+
+启动后访问 <http://127.0.0.1:7788/>。Ctrl-C 停止。
+
+### 功能
+
+- **统一列表**：教师 (personal_page) + 论文作者 (target_candidate) 两个数据源，单独 tab 切换
+- **筛选**：学校 / 院系 / 学科类别 / 审核状态（多选），华人概率阈值，关键词搜索（姓名 / 职位 / 邮箱 / 机构 / ORCID）
+- **排序**：华人概率 ↓ / 姓名 A→Z / 最近更新 ↓
+- **分页**：每页 50 条，可翻页
+- **详情**：教师 → 学校 / 院系 / 职位 / 邮箱 / 原始 URL / 本地 HTML 链接 / 头像 / 华人初筛原因；
+  论文 → 标题 / 期刊 / 发表年 / 作者位序（一作 / 末位 / 通讯） / 机构 / DOI
+- **审核**：状态 (pending / confirmed / excluded / focus) + 备注，保存到 SQLite 并立即在列表中体现
+- **本地 HTML 服务**：`/html/<local_path>` 安全映射到 `dataDir`（防目录遍历）
+
+### CLI 选项
+
+| 选项 | 含义 | 默认 |
+| --- | --- | --- |
+| `--port` / `-p` | 监听端口 | `7788` |
+| `--host` / `-H` | 监听地址 | `127.0.0.1` |
+| `--db` | SQLite 文件 | `faculty/data/faculty.db` |
+| `--data-dir` | 归档 HTML 根目录 | DB 同级 |
+| `--static-dir` | 前端静态文件目录 | `faculty/viewer` |
+| `--open` | 启动后用默认浏览器打开 | off |
+| `--verbose` / `-v` | 详细日志 | off |
+
+### API 路由
+
+| 路由 | 用途 |
+| --- | --- |
+| `GET /` | SPA 入口 |
+| `GET /assets/{app.js,app.css}` | 前端静态资源 |
+| `GET /api/candidates?source=faculty\|paper&…` | 候选人列表（分页 / 筛选 / 排序） |
+| `GET /api/candidates/{source}:{id}?source=…` | 详情 |
+| `PATCH /api/candidates/{source}:{id}` | 写回审核状态 + 备注 |
+| `GET /api/facets` | 维度字典（学校 / 院系 / 类别 / 状态枚举） |
+| `GET /api/stats` | 顶层计数（教师 / 论文 / 华人 / 状态分布） |
+| `GET /html/<encoded-path>` | 归档的本地 HTML（防目录遍历） |
+| `GET /photo/<encoded-path>` | 归档的本地图片（防目录遍历） |
+
+### BRA-23 协作约束
+
+`paper_authors` 表的 `review_status` / `review_notes` 字段由 [BRA-23] 后端任务添加。
+在那之前，查看器对论文候选人的 `PATCH` 会返回 `persisted: false` 并附 `warning`，
+UI 用橙色 toast 提示，**不会**回写。BRA-23 落地后无需改查看器代码，自动转为持久化。
+
+### 演示数据
+
+`scripts/seed_paper_authors.js` 会向 `faculty.db` 注入 25 篇样例 paper + 50 个 paper_author
+（覆盖一作 / 末位 / 通讯三种位序），用于没有 BRA-9 真实数据时快速演示：
+
+```bash
+node faculty/scripts/seed_paper_authors.js --db <data-dir>/faculty.db --count 25
+```
+
+### 自测
+
+```bash
+node faculty/scripts/tests/run.js   # 199 tests, 0 failed
+```
+
+新增的 23 个测试在 `tests/viewer_api.test.js`，覆盖：
+- faculty / paper 列表 + 详情 + 筛选 + 排序 + 分页
+- 关键词搜索、状态枚举、维度统计
+- 写回审核（faculty 真实落库 / paper 缺列降级）
+- HTTP 路由 / 路径遍历阻断 / 非法 status 拒绝
 
 ## 已知限制
 
@@ -258,9 +345,12 @@ VALIDATION OK
 - 真实网络跑批时，部分学校（Stanford / Princeton / 清华 等）教师页需要 JS 渲染，已标记 `requires_js`，需另起 headless（puppeteer）任务；本 MVP 走 SSR，仅记录 `requires_js` 状态。
 - 华人姓名规则偏向高召回（漏杀成本 >> 误报成本），下游需人工复核或加二次过滤。
 - 不下载 / 处理教师照片（属 BRA-8）。
-- 不抓取论文 / 出版列表（属 BRA-9）。
+- 不抓取论文 / 出版列表（属 BRA-9，BRA-10 复用其 `paper_authors` 落库）。
+- **BRA-10**：`paper_authors.review_status` / `review_notes` 写回在 [BRA-23] 落地前为 no-op；UI 提示但不阻断操作。
+- **BRA-10**：`name_raw = 'Not Found'` 的列表页条目（来自 mit-idss-cm 等 WP 模板）会原样显示，建议配合原 URL fallback 一次 `og:title`（不在 MVP 范围）。
 
 ## 联系
 
 - 字段 / 数据 / 接口调整 → 继续 mention 后端开发工程师
-- 前端 viewer / 人工审核 UI → 移交 BRA-10 前端开发工程师
+- 爬虫 / 抓取 / BRA-8 照片 / BRA-9 论文 → 继续 mention 后端开发工程师
+- 查看器 / 人工审核 UI / BRA-10 → 前端开发工程师（owner）

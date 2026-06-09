@@ -22,6 +22,7 @@ const testFiles = [
   './papers_csv.test.js',
   './paper_extract.test.js',
   './papers_flow.test.js',
+  './viewer_api.test.js',
 ];
 
 let totalRun = 0;
