@@ -174,4 +174,78 @@ test('extractAuthorships: 通讯作者非首/末位也记为 target', () => {
   assert.equal(li.isTargetCandidate, true);
 });
 
+test('extractAuthorships: 邮箱抽到 → emailRaw / emailSource / emailMatchContext 写入', () => {
+  const work = {
+    authorships: [
+      { name: 'Wang Xiaoming', position: 0, is_first_author: true, is_last_author: false, is_corresponding: false,
+        affiliation_raw: 'Tsinghua University; Corresponding author: wang@tsinghua.edu.cn' },
+      { name: 'John Smith', position: 1, is_first_author: false, is_last_author: true, is_corresponding: true,
+        affiliation_raw: 'MIT CSAIL' },
+    ],
+  };
+  const out = extractAuthorships({ work, paperId: 'p', threshold: 0.4 });
+  // Wang: 邮箱命中 (Corresponding author 段)
+  assert.equal(out[0].emailRaw, 'wang@tsinghua.edu.cn');
+  assert.equal(out[0].emailSource, 'openalex_regex');
+  assert.ok(out[0].emailMatchContext && out[0].emailMatchContext.includes('wang@tsinghua.edu.cn'));
+  // John: 无邮箱 → null 三件套
+  assert.equal(out[1].emailRaw, null);
+  assert.equal(out[1].emailSource, null);
+  assert.equal(out[1].emailMatchContext, null);
+});
+
+test('extractAuthorships: OpenAlex raw_affiliation_strings (数组) → join + email 抽取', () => {
+  // 模拟 OpenAlex 实际响应：raw_affiliation_strings 是 string[]
+  const work = {
+    authorships: [
+      { name: 'Wang Xiaoming', position: 0, is_first_author: true, is_last_author: false, is_corresponding: false,
+        raw_affiliation_strings: [
+          'Department of Industrial Engineering, Tsinghua University, Beijing, China',
+          'Corresponding author: wang.xm@tsinghua.edu.cn',
+        ],
+        institutions: [{ id: 'I1', display_name: 'Tsinghua University' }] },
+    ],
+  };
+  const out = extractAuthorships({ work, paperId: 'p1', threshold: 0.4 });
+  // affiliation_raw 应为 join 后的字符串
+  assert.equal(out[0].affiliationRaw, 'Department of Industrial Engineering, Tsinghua University, Beijing, China; Corresponding author: wang.xm@tsinghua.edu.cn');
+  // 邮箱命中 (Corresponding author 段，confidence=0.9)
+  assert.equal(out[0].emailRaw, 'wang.xm@tsinghua.edu.cn');
+  assert.equal(out[0].emailSource, 'openalex_regex');
+  assert.ok(out[0].emailMatchContext && out[0].emailMatchContext.includes('wang.xm@tsinghua.edu.cn'));
+});
+
+test('extractAuthorships: 无 raw_affiliation_strings → affiliation_raw = null + email = null', () => {
+  const work = {
+    authorships: [
+      { name: 'John Smith', position: 0, is_first_author: true, is_last_author: false, is_corresponding: false,
+        institutions: [{ id: 'I1', display_name: 'MIT' }] },
+    ],
+  };
+  const out = extractAuthorships({ work, paperId: 'p1', threshold: 0.4 });
+  assert.equal(out[0].affiliationRaw, null);
+  assert.equal(out[0].emailRaw, null);
+  assert.equal(out[0].emailSource, null);
+});
+
+test('extractAuthorships: 同位置同人重抓 → email 字段更新（upsert）', () => {
+  const work = {
+    authorships: [
+      { name: 'Wang Xiaoming', position: 0, is_first_author: true, is_last_author: false, is_corresponding: false,
+        affiliation_raw: 'Tsinghua University; wang@tsinghua.edu.cn' },
+    ],
+  };
+  const out1 = extractAuthorships({ work, paperId: 'p', threshold: 0.4 });
+  // 第一次：无 Corresponding author 标记 → low confidence
+  assert.equal(out1[0].emailRaw, 'wang@tsinghua.edu.cn');
+  assert.equal(out1[0].emailSource, 'openalex_regex');
+  // 改 affiliation 后：再抽
+  work.authorships[0].affiliation_raw = 'Tsinghua University; Corresponding author: wang@tsinghua.edu.cn';
+  const out2 = extractAuthorships({ work, paperId: 'p', threshold: 0.4 });
+  // id 稳定（同名同位置），email 字段更新
+  assert.equal(out2[0].id, out1[0].id);
+  assert.equal(out2[0].emailRaw, 'wang@tsinghua.edu.cn');
+  assert.ok(out2[0].emailMatchContext.includes('Corresponding author'));
+});
+
 module.exports = { tests };

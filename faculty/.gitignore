@@ -13,6 +13,15 @@ data/real-*/papers.jsonl
 data/real-*/paper_authors.jsonl
 data/real-*/journals.jsonl
 data/real-*/crawl_log.jsonl
+data/real-*/orcid_query_log.jsonl
+
+# BRA-9.3 3a spike 产物（持久化走 GitHub Release）
+data/real-*/crossref_email_query_log.jsonl
+data/real-*/openaire_email_query_log.jsonl
+data/real-*/crossref_email_summary.json
+data/real-*/openaire_email_summary.json
+data/real-*/bra93-dois-1000.txt
+
 data/real-*/faculty.db-journal
 data/real-*/faculty.db-wal
 data/real-*/faculty.db-shm

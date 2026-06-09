@@ -22,6 +22,10 @@ const testFiles = [
   './papers_csv.test.js',
   './paper_extract.test.js',
   './papers_flow.test.js',
+  './email_extract.test.js',
+  './orcid_enrich.test.js',
+  './crossref_email.test.js',
+  './openaire_email.test.js',
   './viewer_api.test.js',
 ];
 

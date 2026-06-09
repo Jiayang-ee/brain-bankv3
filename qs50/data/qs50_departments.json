@@ -1,11 +1,11 @@
 {
   "meta": {
-    "version": "2.1.0",
+    "version": "2.2.0",
     "ranking_edition": "QS World University Rankings 2026",
     "source_url": "https://www.topuniversities.com/university-rankings/world-university-rankings/2026",
-    "collection_date": "2026-06-03",
-    "collector": "multica-agent:cc7e4ed8 (后端开发工程师)",
-    "schema_version": "1.0",
+    "collection_date": "2026-06-04",
+    "collector": "multica-agent:a96a336b (后端开发工程师)",
+    "schema_version": "1.1",
     "status_legend": {
       "valid": "URL 已确认存在并与目标院系相关；可在抓取时直接读取",
       "requires_js": "页面需要 JS 渲染才能获取完整教师/研究方向列表，建议走 headless 浏览器",
@@ -25,7 +25,10 @@
       "business_analytics": "商业分析 / 量化管理",
       "public_policy": "公共政策 / 公共管理"
     },
-    "notes": "v2.1 在 v2.0 基础上：(1) 补齐 business_analytics 类别（v2.0 仅在 notes 中提及，category 字段为空）：新增 5 条独立 program 条目 (MIT MBAn / Imperial MScBA / CMU Tepper MSBA / UT Austin MSBA / UCLA Anderson MQE)；(2) 现在 10/10 任务方向均有独立 category 条目；(3) validate.js 增加 required_category_coverage 校验，强制所有 10 个 category ≥ 1 条。v2.0 仍以 suspected_irrelevant 占位 Caltech。"
+    "notes": "v2.2 在 v2.1 基础上（BRA-15 校准）：(1) schema 升级到 v1.1，新增可选字段 list_url_hint（显式教师列表页 URL hint，爬虫会先于常见后缀拼接探测），先在 eth-dmtec 与 tsinghua-sem 两条落地；schema.md 已同步更新。(2) tsinghua-dmei 的 url=https://www.imse.tsinghua.edu.cn/ 在 BRA-7.1 真实网络冒烟中触发 DNS 错误，为避免污染 fetcher failure 计数，将 status 改为 requires_manual_confirmation（不再走 active 入口探测），并补充 notes 说明后续维护路径；department_id 与 url 字段本身保留，方便维护者基于此条目人工维护。(3) 其余 102 条数据与 v2.1 完全一致。v2.1 的 business_analytics 补齐与 required_category_coverage 校验保留。 v2.2 (BRA-15 followup): 校准 stale list_url_hint 到当前 200 路径。",
+    "data_version": "2.2.0",
+    "last_edited_by": "multica-agent:a96a336b (后端开发工程师)",
+    "last_edited_at": "2026-06-03T17:30:00Z"
   },
   "entries": [
     {
@@ -242,10 +245,11 @@
       "department_id": "eth-dmtec",
       "department_name_en": "ETH Zurich Department of Management, Technology, and Economics (D-MTEC)",
       "url": "https://mtec.ethz.ch/",
+      "list_url_hint": "https://mtec.ethz.ch/people.html",
       "category": "engineering_management",
       "status": "valid",
       "needs_js_hint": false,
-      "notes": "D-MTEC 含管理、运筹、系统工程、风险与安全、健康 TIK。Chair of Operations Research: https://or.ethz.ch/。Faculty: https://mtec.ethz.ch/people/people.html",
+      "notes": "D-MTEC 含管理、运筹、系统工程、风险与安全、健康 TIK。Chair of Operations Research: https://or.ethz.ch/。BRA-15 v2.2 校准：list_url_hint 改指向当前 200 路径 https://mtec.ethz.ch/people.html（旧 hint /people/people.html 已 404；目标页是 XHR/JS 渲染，SSR-only fetcher 仅能 200 探测，profile 落地属 JS 渲染范围、超出 BRA-11 父 issue 边界）。",
       "last_validated_at": null,
       "validated_by": null
     },
@@ -568,9 +572,9 @@
       "department_name_en": "Tsinghua Department of Management Science and Engineering (MSE / 工业工程系)",
       "url": "https://www.imse.tsinghua.edu.cn/",
       "category": "engineering_management",
-      "status": "valid",
+      "status": "requires_manual_confirmation",
       "needs_js_hint": false,
-      "notes": "管理科学与工程是清华一级学科，工业工程系是承载单位之一；含运筹、决策、物流与供应链、信息系统。",
+      "notes": "管理科学与工程是清华一级学科，工业工程系是承载单位之一；含运筹、决策、物流与供应链、信息系统。BRA-15 (v2.2)：url=https://www.imse.tsinghua.edu.cn/ 在 BRA-7.1 真实网络冒烟中触发 DNS 错误（enotfound www.imse.tsinghua.edu.cn）。为避免污染 fetcher failure 计数、便于人工维护者与 fetcher failure 区分，status 改为 requires_manual_confirmation（active 入口探测会跳过本条，写入 audit skipped 行而非 no_list_page failure）。department_id 与 url 保留，待维护者确认正确入口（如校级目录 https://www.tsinghua.edu.cn/info/1183/7291.htm 或经工业工程系实际站点）后回写。",
       "last_validated_at": null,
       "validated_by": null
     },
@@ -580,10 +584,11 @@
       "department_id": "tsinghua-sem",
       "department_name_en": "Tsinghua School of Economics and Management (SEM)",
       "url": "https://www.sem.tsinghua.edu.cn/",
+      "list_url_hint": "https://www.sem.tsinghua.edu.cn/en/Faculty/Faculty/Current_Faculty.htm",
       "category": "business_school",
       "status": "valid",
       "needs_js_hint": false,
-      "notes": "清华大学经济管理学院，含本科、博士、MBA、EMBA。教师中文: https://www.sem.tsinghua.edu.cn/szll/jzg.htm，英文: https://www.sem.tsinghua.edu.cn/en/People/Faculty.htm",
+      "notes": "清华大学经济管理学院，含本科、博士、MBA、EMBA。教师中文: https://www.sem.tsinghua.edu.cn/szll/jzg.htm。BRA-15 v2.2 校准：list_url_hint 改指向当前 200 路径 https://www.sem.tsinghua.edu.cn/en/Faculty/Faculty/Current_Faculty.htm（旧 hint /en/People/Faculty.htm 已 404；当前英文教师页仍为 Tsinghua VSB 动态加载，SSR-only fetcher 0 profile 属 JS 渲染范围、超出 BRA-11 父 issue 边界）。",
       "last_validated_at": null,
       "validated_by": null
     },
@@ -593,6 +598,7 @@
       "department_id": "tsinghua-sppm",
       "department_name_en": "Tsinghua School of Public Policy & Management (SPPM)",
       "url": "https://www.sppm.tsinghua.edu.cn/",
+      "list_url_hint": "https://www.sppm.tsinghua.edu.cn/english/Faculty/Full_time_Faculty.htm",
       "category": "public_policy",
       "status": "valid",
       "needs_js_hint": false,

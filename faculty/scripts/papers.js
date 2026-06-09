@@ -117,11 +117,14 @@ const DRYRUN_SAMPLE = (journal) => ([
     biblio: { volume: '1', issue: '1', first_page: '1', last_page: '20' },
     authorships: [
       { author: { display_name: 'Wang Xiaoming' }, position: 'first', is_corresponding: false,
-        raw_affiliation_string: 'Tsinghua University', institutions: [{ id: 'I123', display_name: 'Tsinghua University' }] },
+        raw_affiliation_strings: ['Department of Industrial Engineering, Tsinghua University, Beijing, China', 'Corresponding author: wang.xm@tsinghua.edu.cn'],
+        institutions: [{ id: 'I123', display_name: 'Tsinghua University' }] },
       { author: { display_name: 'Li Wei' }, position: 'middle', is_corresponding: true,
-        raw_affiliation_string: 'Peking University', institutions: [{ id: 'I456', display_name: 'Peking University' }] },
+        raw_affiliation_strings: ['School of Management, Peking University'],
+        institutions: [{ id: 'I456', display_name: 'Peking University' }] },
       { author: { display_name: 'John Smith' }, position: 'last', is_corresponding: false,
-        raw_affiliation_string: 'MIT', institutions: [{ id: 'I789', display_name: 'MIT' }] },
+        raw_affiliation_strings: ['MIT'],
+        institutions: [{ id: 'I789', display_name: 'MIT' }] },
     ],
   },
   {
@@ -137,9 +140,11 @@ const DRYRUN_SAMPLE = (journal) => ([
     biblio: { volume: '2', issue: '3', first_page: '100', last_page: '120' },
     authorships: [
       { author: { display_name: '陈晓' }, position: 'first', is_corresponding: true,
-        raw_affiliation_string: '上海交通大学', institutions: [{ id: 'I111', display_name: 'Shanghai Jiao Tong University' }] },
+        raw_affiliation_strings: ['Antai College of Economics & Management, Shanghai Jiao Tong University', 'Contact: chenx@sjtu.edu.cn'],
+        institutions: [{ id: 'I111', display_name: 'Shanghai Jiao Tong University' }] },
       { author: { display_name: 'Zhang Ling' }, position: 'last', is_corresponding: false,
-        raw_affiliation_string: 'Fudan University', institutions: [{ id: 'I222', display_name: 'Fudan University' }] },
+        raw_affiliation_strings: ['Fudan University'],
+        institutions: [{ id: 'I222', display_name: 'Fudan University' }] },
     ],
   },
 ]);

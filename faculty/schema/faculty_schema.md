@@ -1,8 +1,8 @@
-# Faculty Crawler Schema (v1.2)
+# Faculty Crawler Schema (v1.5)
 
 > 维护方：后端开发工程师 (multica-agent: `a96a336b`)
-> 适用任务：BRA-7 学校官网教师页入口发现与本地归档爬虫 / BRA-8 教师照片下载与抓取状态日志 / BRA-9 期刊论文 API 查询与华人姓名高召回初筛
-> 数据版本：v1.2
+> 适用任务：BRA-7 学校官网教师页入口发现与本地归档爬虫 / BRA-8 教师照片下载与抓取状态日志 / BRA-9 期刊论文 API 查询与华人姓名高召回初筛 / BRA-9.1 作者邮箱 enrich / BRA-9.2 ORCID 公共 API 反向查询 enrich / BRA-9.3 email 路径 pivot + ORCID KPI 切换
+> 数据版本：v1.5
 > 关联输入：`qs50/data/qs50_schools.json` (v1.0) + `qs50/data/qs50_departments.json` (v2.1) + `faculty/data/journals.csv`（BRA-9 附件）
 > 关联下游：BRA-10（人工审核查看器）
 
@@ -341,9 +341,14 @@ CREATE TABLE IF NOT EXISTS paper_authors (
   chinese_name_reasons      TEXT,                -- JSON array
   chinese_name_negatives    TEXT,                -- JSON array
   is_target_candidate       INTEGER NOT NULL DEFAULT 0,
+  -- BRA-9.1 邮箱 enrich 字段
+  email_raw                 TEXT,                -- 抽到的邮箱原文
+  email_source              TEXT,                -- 'openalex_regex' | 'publisher_wiley' | 'publisher_elsevier' | 'manual'
+  email_match_context       TEXT,                -- 命中哪条 affiliation 字符串（截断 500 字符）
   first_seen_at             TEXT    NOT NULL,
   last_seen_at              TEXT    NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_pa_email_source ON paper_authors(email_source);
 ```
 
 ### `journals.query_status` 枚举（BRA-9 引入）
@@ -374,3 +379,192 @@ CREATE TABLE IF NOT EXISTS paper_authors (
 | `3` | 过滤后没有任何期刊被选中 |
 
 `api_unsupported` 属于预期路径（CN-only 中文期刊），不计入 failure / 不影响退出码。
+
+### `paper_authors.email_source` 枚举（BRA-9.1 引入，BRA-9.2 扩展）
+
+| 值 | 含义 |
+| --- | --- |
+| `openalex_regex` | path A 兜底：OpenAlex `raw_affiliation_string` 正则命中 |
+| `publisher_wiley` | path B（预留，后续 spike）：Wiley 论文详情页抽取 |
+| `publisher_elsevier` | path B（预留，后续 spike）：Elsevier 论文详情页抽取 |
+| `orcid_public_api` | path C（BRA-9.2）：ORCID 公共 API `/person` 端点命中用户主动公开的 email |
+| `manual` | 人工录入 |
+
+### 邮箱覆盖率目标（BRA-9.1 验收标准）
+
+路径 A 经验覆盖率 < 5%（多数论文在 OpenAlex 入索引时 affiliations 已被截短）；
+`validate.js` 校验门槛：`count(email_raw != null) / count(*) >= 1%`。
+覆盖率不达 1% 视为 path A 失败（与 BRA-9.1 issue 验收标准对齐）。
+
+## v1.3 变更（BRA-9.1）
+
+- `paper_authors` 表新增 3 个 nullable 列：`email_raw` / `email_source` / `email_match_context`
+- 新增索引 `idx_pa_email_source ON paper_authors(email_source)`，便于按来源筛选
+- 新增模块 `faculty/scripts/lib/email_extract.js`：RFC5322 简化正则 + 黑名单域 + 长度上限 + Corresponding author 标记优先
+- `paper_extract.js` 的 `extractAuthorships()` 调用 `extractEmailForAuthor()`，把命中邮箱写入 `emailRaw/emailSource/emailMatchContext`
+- `storage.js` 的 `createStore()` 用 `ensureColumn()` 幂等迁移；新跑 + 老 DB 共存
+- 新增测试 `email_extract.test.js`（15 个测试用例）
+- `validate.js` 新增 4 段校验：覆盖率（>= 1%）、邮箱格式（GLOB + 正则）、长度上限（<= 254）、黑名单域、`email_source` 枚举
+- `paper_authors.jsonl` 流水增加 `email_raw` / `email_source` / `email_match_context` 三个字段（向后兼容：未命中作者三件套都是 null）
+
+## v1.4 变更（BRA-9.2）
+
+- `paper_authors` 表新增 7 个 nullable 列（`orcid` 字段本身已存在）：
+  - `email_orcid_id TEXT` — 命中邮箱的 ORCID iD（形如 `0000-0000-0000-0000` 或末位 `X`）
+  - `orcid_credit_name TEXT` — ORCID profile 上的 display name
+  - `orcid_external_ids_json TEXT` — Scopus / ResearcherID / ISNI 等 external IDs（JSON array）
+  - `orcid_affiliations_json TEXT` — employment + education history（JSON array — killer feature，识别跳槽）
+  - `orcid_last_modified TEXT` — ORCID profile last-modified 时间（HTTP `Last-Modified` 头）
+  - `orcid_last_fetched TEXT` — 我们打 ORCID API 的时间（audit / 30 天增量窗口）
+  - `orcid_profile_json TEXT` — 完整 `/person` 响应（冷字段兜底；平均 ~1 KB/作者）
+- 新增索引 `idx_pa_orcid_fetched ON paper_authors(orcid, orcid_last_fetched)` — 增量重跑友好
+- `email_source` 枚举增加 `'orcid_public_api'`，合法值集合 4 → 5
+- 新增模块 `faculty/scripts/lib/orcid_enrich.js`：
+  - `normalizeOrcidId()` — 兼容 19 位短横线 / URL 前缀 / 16 位裸数字
+  - `extractEmailsFromPerson()` / `extractExternalIds()` / `extractAffiliationsFromPerson()` / `extractCreditName()`
+  - `fetchPerson()` — 5 req/sec 限速 + 4xx/5xx/429 退避策略（4xx 不重试；429/5xx 指数退避 1s/2s/4s 最多 3 次）
+  - `processAuthor()` — 把 fetchPerson 结果整理成 `store.recordOrcidProfile` 期望的入参
+- 新增脚本 `faculty/scripts/orcid_enrich.js`（CLI 入口）：
+  - `--all` / `--orcid XXXX-XXXX-XXXX-XXXX` / `--max-queries N` / `--force` / `--dry-run` / `--out DIR`
+  - 输入过滤：`chinese_name_probability >= 0.4 AND (is_first_author=1 OR is_corresponding=1) AND email_raw IS NULL AND orcid 非空`
+  - 30 天增量窗口（`--force` 跳过）
+  - 写 `faculty/data/real-<DATE>/orcid_query_log.jsonl` 审计行（HTTP status / latency / response hash）
+- `storage.js` 新增 `recordOrcidProfile()` / `selectOrcidLookupRows()` / `getOrcidLookupStats()` 三个 helper
+- `validate.js` 新增 ORCID 段校验：
+  - `email_orcid_id` 格式（`0000-0000-0000-0000` 或末位 `X`）
+  - `email_source='orcid_public_api'` 与 `email_orcid_id` 一致性
+  - 3 个 JSON 列（`orcid_external_ids_json` / `orcid_affiliations_json` / `orcid_profile_json`）`json_valid()` 合法率
+  - `orcid_last_fetched` 非空的行 companion 字段（`email_orcid_id` / `orcid_last_modified` / `orcid_profile_json`）都必须非空
+  - `orcid_query_log.jsonl` JSONL 合法率
+- 新增测试 `orcid_enrich.test.js`（~24 个测试用例）：
+  - `normalizeOrcidId` 各种输入形式
+  - `extractEmailsFromPerson` / `extractExternalIds` / `extractAffiliationsFromPerson` / `extractCreditName` 各种边界
+  - `isValidEmailFormat` 边界（黑名单 / ISSN-like / IP / 长度）
+  - `processAuthor` 用 mock fetch 测 200+email / 200 空 email / 404 / 403（不重试） / 429 退避 / 5xx 退避 / invalid orcid
+  - `store.recordOrcidProfile` 集成测试（含 `COALESCE` 保护）
+  - `store.selectOrcidLookupRows` filter / 30 天窗口 / `--force` 重跑
+- `email_extract.test.js` enum 校验更新（4 → 5）
+- `paper_authors.jsonl` 流水增加 7 个 ORCID 字段（向后兼容：未跑 spike 的作者都是 null）
+- `storage.js` 的 `createStore()` 用 `ensureColumn()` 幂等迁移；新跑 + 老 DB 共存
+
+### ORCID 路径 KPI 切换（BRA-9.2 spike 结论，BRA-9.3 正式落地）
+
+> 维护方：后端开发工程师 (multica-agent: `a96a336b`)
+> 切换日期：2026-06-07
+> 切换依据：[BRA-9.3 (BRA-18)](mention://issue/43cebb17-9e6a-4a30-92d6-8e252733f09c) / 100 样本 spike 跑完（PR #12 smoke log）
+
+BRA-9.2 ORCID 公共 API 100 样本烟测跑完后确认：ORCID 公共 API（匿名 `/read-public` scope）**结构上不返回 email**（需 `/email/read-private` scope，匿名访问拿不到）。因此 ORCID 路径重新定位为 **profile + affiliations enrich**，email 通道让位给其他方向（BRA-9.3 spike 候选）。
+
+| 维度 | 切换前 (BRA-9.2 spike 期) | 切换后 (BRA-9.3 起) |
+| --- | --- | --- |
+| **核心 KPI** | email 命中率（`count(email_source='orcid_public_api' AND email_raw IS NOT NULL) / count(*)`） | **profile 覆盖率**（`count(orcid_affiliations_json IS NOT NULL) / count(orcid_last_fetched IS NOT NULL)`） |
+| 字段保留 | 7 列 ORCID profile | 7 列 ORCID profile（**保留不动**：affiliations / credit_name / external_ids / last_modified / profile_json） |
+| 代码保留 | `lib/orcid_enrich.js` + `scripts/orcid_enrich.js` CLI + 24 单测 | 同上（PR #12 已合入） |
+| 价值定位 | email 补全通道 | **同名消歧 + 跳槽识别**（affiliations 历史的非 path B 唯一稳定来源） |
+| 验收门槛 | 命中率 ≥ 1% | profile 覆盖率 ≥ 50%（用 100 个已知跳槽作者 sample 验证，准确率达标即可进 spike → 一期放量） |
+
+### `email_source` 枚举（BRA-9.3 标注：`orcid_public_api` 仅作为 cold 备份）
+
+**生产合法值集合（5 个）— `validate.js` / `email_extract.js` 实际校验的就是这一组**：
+
+| 值 | 含义 | 路径等级 |
+| --- | --- | --- |
+| `openalex_regex` | path A 主路径（BRA-9.1）：OpenAlex `raw_affiliation_string` 正则命中 | 首选 |
+| `publisher_wiley` | path B 候选：Wiley 论文详情页抽取 | 备选 spike |
+| `publisher_elsevier` | path B 候选：Elsevier 论文详情页抽取 | 备选 spike |
+| `orcid_public_api` | path Z 兜底（BRA-9.2）：ORCID 公共 API `/person` 端点命中用户主动公开的 email（实际命中率约 0%，**不作为 KPI 指标**） | 兜底 |
+| `manual` | 人工录入 | 兜底 |
+
+**spike 候选值（未启用 / 保留给未来重新评估）— 不在 `VALID_SOURCES` 里**：
+
+| 值 | 含义 | 状态 |
+| --- | --- | --- |
+| `crossref_work_meta` | path C 候选（BRA-9.3 3a spike）：Crossref `/works/{doi}` 节点命中 assertion / license 邮箱 | **3a spike 关停**（1,000 真实 DOI 命中率 0%），不在 `validate.js` `VALID_SOURCES` 启用 |
+| `openaire_meta` | path D 候选（BRA-9.3 3a spike）：OpenAIRE `/researchProducts` 节点命中 OAI-PMH 邮箱 | **3a spike 关停**（1,000 真实 DOI 命中率 0.2% 去噪后），不在 `validate.js` `VALID_SOURCES` 启用 |
+
+> 备注：自 BRA-9.3 起，路径 A `openalex_regex` 仍是 email 补全主路径（已稳态 ≥ 1%）；path C/D spike 跑完 ROI 关停后**不在 validate.js 启用**（避免写库时再被覆盖成 5 个合法值之外的脏值）。path Z `orcid_public_api` 不再计入 email 命中率 KPI，但保留字段 + 写回逻辑（affiliations 价值已独立计 KPI）。**未来如要重新激活 path C/D，需同时改 schema 文档、`email_extract.js` `VALID_SOURCES`、`email_extract.test.js` 长度断言、`validate.js` `VALID_SOURCES` 四处，并升 schema minor 版本号**。
+
+### ORCID profile 覆盖率目标（BRA-9.3 新增 KPI 验收标准）
+
+```sql
+-- 已查询行（orcid_last_fetched 非空）= 分母
+-- orcid_affiliations_json 非空 = 分子
+-- KPI 门槛：>= 50%
+SELECT
+  SUM(CASE WHEN orcid_affiliations_json IS NOT NULL AND orcid_affiliations_json != '' THEN 1 ELSE 0 END) AS covered,
+  SUM(CASE WHEN orcid_last_fetched IS NOT NULL THEN 1 ELSE 0 END) AS queried
+FROM paper_authors
+WHERE chinese_name_probability >= 0.4
+  AND (is_first_author = 1 OR is_corresponding = 1)
+  AND orcid IS NOT NULL AND orcid <> '';
+```
+
+覆盖率 < 50% 视为 ORCID profile 路径不合格（与 BRA-9.3 issue 验收标准对齐）。
+
+## v1.5 变更（BRA-9.3）
+
+- **ORCID 路径 KPI 切换落地**：
+  - schema 顶部版本号 v1.4 → v1.5
+  - 新增「ORCID 路径 KPI 切换」段落（v1.4 spike 结论正式文档化）
+  - `email_source` 枚举表新增 2 个 BRA-9.3 spike 候选值（`crossref_work_meta` / `openaire_meta`），**仅作 spike 候选 / 未启用**（不在 `validate.js` `VALID_SOURCES` / `email_extract.js` `VALID_SOURCES` / `email_extract.test.js` 长度断言中启用）；生产合法值仍 5 个（与代码对齐）
+  - `orcid_public_api` 在表里标记为「path Z 兜底，不作为 email KPI 指标」
+  - 新增 ORCID profile 覆盖率 KPI 计算 SQL + 50% 门槛
+- `validate.js` ORCID 段输出新增 "profile 覆盖率" 行：
+  - 行格式：`- ORCID profile 覆盖率: covered/queried = NN.N% (门槛 50%)`
+  - 当 `covered / queried < 0.5` 时 `fail()`（与 50% 门槛对齐）
+- 不推翻 PR #12 已合入的 schema/CLI/单测：7 列 ORCID 字段 + `idx_pa_orcid_fetched` 索引 + `lib/orcid_enrich.js` + `scripts/orcid_enrich.js` + 24 单测全部保留
+
+### 3a spike 落地（BRA-9.3 决策二：Crossref / OpenAIRE 邮箱抽取）
+
+#### Crossref `/works/{doi}` 邮箱抽取模块
+
+新增 `faculty/scripts/lib/crossref_email.js`：
+- `normalizeDoi()` — 兼容 URL 前缀 / `doi:` 前缀 / 大小写
+- `isValidEmailFormat()` / `isBlacklistedDomain()` — 与 email_extract 对齐（黑名单加 publisher 自身域）
+- `extractEmailsFromWork()` — 扫 5 个塞邮箱位置：
+  1. `author[].affiliation[].name`（最常见）
+  2. `author[].name`（罕见）
+  3. `author[].role[].role` 字符串（罕见）
+  4. `assertion[].value` / `assertion[].name`（极罕见）
+  5. `license[].URL`（极罕见）
+- `fetchWork()` — 20 req/sec 限速 + 4xx/5xx/429 退避（与 ORCID 公共 API 行为对齐）
+- `processWork()` — end-to-end 入口
+
+#### OpenAIRE `/search/researchProducts` 邮箱抽取模块
+
+新增 `faculty/scripts/lib/openaire_email.js`：
+- `extractEmailsFromJson()` — walk JSON 节点；`field:email` / `field:@email` / `field:mail` / `field:contact` 等邮箱关键字优先
+- `fetchByDoi()` — 5 req/sec 限速 + 退避策略
+- `processDoi()` — end-to-end 入口
+- 黑名单加 `openaire.eu` / `github.com` / `gitlab.com` / `bitbucket.org` / `academia.edu` / `researchgate.net` / `linkedin.com`（1,000 样本 spike 跑出来的噪声）
+
+#### CLI 入口
+
+新增 `faculty/scripts/crossref_email_enrich.js` / `faculty/scripts/openaire_email_enrich.js`：
+- `--all` / `--doi <doi>` / `--sample N` / `--max-queries N` / `--dry-run` / `--out DIR` / `--verbose`
+- 写 `faculty/data/real-<DATE>/{crossref,openaire}_email_query_log.jsonl` 审计行
+- 写 `faculty/data/real-<DATE>/{crossref,openaire}_email_summary.json` 命中汇总
+- 退出码 0/1/2 与 ORCID 路径对齐
+
+#### 3a spike 1,000 真实 DOI 跑批结果（2026-06-07）
+
+详细命中明细 + ROI 决策见 `faculty/data/real-2026-06-07/SUMMARY.md` + `RELEASE_NOTES.md` + 5 asset release artifact。
+
+| 维度 | Crossref | OpenAIRE |
+| --- | ---: | ---: |
+| DOI 池 | 1,000 | 1,000 |
+| 命中率（raw） | **0%** | **0.4%** |
+| 命中率（去噪后） | 0% | **0.2%** |
+| 真失败 | 0 | 0 |
+| 退出码 | 0 | 0 |
+
+**ROI 决策（BRA-9.3 3a 关停）**：
+- Crossref 0% + OpenAIRE 0.2% 都 < 0.5% 门槛（issue 风险段已预设关停路径）
+- **关停 3a**，不再投入 3b/3c spike（3b 反爬风险 BRA-7.3 同质，3c 覆盖度 < 5% 论文）
+- email 路径天花板即现状：OpenAlex path A 2.18%（BRA-9.1）是唯一稳定来源，不再加新 spike
+
+#### 新增单测
+
+- `crossref_email.test.js` — 30 个测试用例
+- `openaire_email.test.js` — 16 个测试用例（含黑名单域 8 个）
+- 总单测 232 → 278（+46）

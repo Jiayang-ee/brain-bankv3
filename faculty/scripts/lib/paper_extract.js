@@ -17,6 +17,7 @@
 
 const crypto = require('node:crypto');
 const { looksChinese } = require('./chinese.js');
+const { extractEmailForAuthor } = require('./email_extract.js');
 
 function normalizeTitle(s) {
   if (!s) return '';
@@ -90,18 +91,28 @@ function normalizeAuthorship(auth, total, idxFallback) {
   }
   // OpenAlex: auth.author.display_name
   //           auth.is_corresponding
-  //           auth.raw_affiliation_string
+  //           auth.raw_affiliation_strings (string[] — 实际字段名带 s)
   //           auth.institutions[].id, .display_name
   const isFirst = auth.is_first_author || position === 0 || idx === 'first';
   const isLast = auth.is_last_author || position === total - 1 || idx === 'last';
   const isCorresponding = Boolean(auth.is_corresponding);
+  // raw_affiliation_strings 是数组；join 供下游 regex / 启发式打分用
+  // 保留 fallback 以兼容 Crossref / 历史数据（Crossref 的 affiliation 是 [{name}]）
+  let affiliationRaw = null;
+  if (Array.isArray(auth.raw_affiliation_strings) && auth.raw_affiliation_strings.length > 0) {
+    affiliationRaw = auth.raw_affiliation_strings.join('; ');
+  } else if (typeof auth.raw_affiliation_string === 'string' && auth.raw_affiliation_string) {
+    affiliationRaw = auth.raw_affiliation_string;  // 旧 / fallback
+  } else if (auth.affiliation_raw) {
+    affiliationRaw = auth.affiliation_raw;          // 显式传入
+  }
   return {
     name,
     position: Number(position) || 0,
     is_first_author: Boolean(isFirst),
     is_last_author: Boolean(isLast),
     is_corresponding: isCorresponding,
-    affiliation_raw: auth.raw_affiliation_string || auth.affiliation_raw || null,
+    affiliation_raw: affiliationRaw,
     affiliation_id: (auth.institutions && auth.institutions[0] && auth.institutions[0].id) || auth.affiliation_id || null,
     affiliation_name: (auth.institutions && auth.institutions[0] && auth.institutions[0].display_name)
       || auth.affiliation_name || null,
@@ -123,6 +134,8 @@ function extractAuthorships({ work, paperId, threshold = 0.4 }) {
     if (!norm || !norm.name) continue;
     const score = scoreAuthorName(norm.name);
     const isTarget = isTargetAuthor(norm) && (score.probability >= threshold);
+    // BRA-9.1 path A：从 affiliation_raw 抽邮箱（OpenAlex regex 兜底）
+    const emailHit = extractEmailForAuthor({ author: { affiliation_raw: norm.affiliation_raw } });
     out.push({
       id: buildAuthorId({ paperId, position: norm.position, name: norm.name }),
       paperId,
@@ -139,6 +152,9 @@ function extractAuthorships({ work, paperId, threshold = 0.4 }) {
       chineseNameReasons: score.reasons || [],
       chineseNameNegatives: score.negatives || [],
       isTargetCandidate: isTarget,
+      emailRaw: emailHit ? emailHit.email : null,
+      emailSource: emailHit ? emailHit.source : null,
+      emailMatchContext: emailHit ? emailHit.context : null,
     });
   }
   return out;
